@@ -1,0 +1,11 @@
+{
+  "name": "prsignals",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "review": "node --experimental-strip-types scripts/prsignals.ts"
+  }
+}

@@ -1,0 +1,167 @@
+name: prsignals
+description: AI-powered pull request reviews with any LLM, large-PR support, and fix briefs for AI coding assistants.
+author: kadraman
+
+branding:
+  icon: eye
+  color: purple
+
+inputs:
+  api-key:
+    description: API key for your LLM provider (pass it from a repository secret).
+    required: true
+  model:
+    description: Model name, exactly as your provider's API expects it.
+    required: true
+  provider:
+    description: "API protocol: 'openai' (any OpenAI-compatible API) or 'anthropic'."
+    required: false
+    default: openai
+  base-url:
+    description: Optional API root override (e.g. https://api.deepseek.com).
+    required: false
+    default: ""
+  temperature:
+    description: Optional sampling temperature. Leave blank to omit it (some models reject it).
+    required: false
+    default: ""
+  max-output-tokens:
+    description: Max output tokens per call (required by the Anthropic API).
+    required: false
+    default: "8192"
+  batch-chars:
+    description: Maximum diff characters sent per API call.
+    required: false
+    default: "100000"
+  max-batches:
+    description: Cost guard. Batches beyond this are listed as not reviewed.
+    required: false
+    default: "40"
+  workers:
+    description: Number of parallel API calls.
+    required: false
+    default: "3"
+  minimum-confidence:
+    description: Minimum signal confidence for inline GitHub comments (0..1).
+    required: false
+    default: "0.85"
+  max-inline-comments:
+    description: Optional cap on inline review comments; 0 means no cap.
+    required: false
+    default: "0"
+  fix-brief:
+    description: "'true' to also produce fix-brief.md for an AI coding assistant."
+    required: false
+    default: "true"
+  post-comment:
+    description: "'true' to post the review as a PR comment."
+    required: false
+    default: "true"
+  github-token:
+    description: Token used to post the comment (needs pull-requests write).
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  review-path:
+    description: Path to the generated review.md.
+    value: ${{ steps.review.outputs.review_path }}
+  fix-brief-path:
+    description: Path to fix-brief.md (empty if there was nothing actionable).
+    value: ${{ steps.review.outputs.brief_path }}
+  fix-brief-url:
+    description: Download URL of the uploaded fix-brief artifact.
+    value: ${{ steps.upload.outputs.artifact-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compute diff
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/prsignals"
+        mkdir -p "$out"
+        if [ -z "${BASE_REF:-}" ]; then
+          echo "::error::prsignals must run on a pull_request event."
+          exit 1
+        fi
+        git fetch --no-tags --quiet origin "$BASE_REF" 2>/dev/null || true
+        if ! git diff --no-color "origin/${BASE_REF}...HEAD" > "$out/pr.diff" 2>/dev/null; then
+          echo "git diff failed (shallow checkout?); falling back to 'gh pr diff'."
+          echo "Tip: use actions/checkout with fetch-depth: 0 to avoid GitHub's API diff limits."
+          gh pr diff "$PR_NUMBER" > "$out/pr.diff"
+        fi
+
+    - name: Set up Node.js for the TypeScript renderer
+      uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - name: Run review
+      id: review
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        LLM_API_KEY: ${{ inputs.api-key }}
+        LLM_MODEL: ${{ inputs.model }}
+        LLM_PROVIDER: ${{ inputs.provider }}
+        LLM_BASE_URL: ${{ inputs.base-url }}
+        LLM_TEMPERATURE: ${{ inputs.temperature }}
+        LLM_MAX_OUTPUT_TOKENS: ${{ inputs.max-output-tokens }}
+        BATCH_CHARS: ${{ inputs.batch-chars }}
+        MAX_BATCHES: ${{ inputs.max-batches }}
+        WORKERS: ${{ inputs.workers }}
+        MINIMUM_CONFIDENCE: ${{ inputs.minimum-confidence }}
+        MAX_INLINE_COMMENTS: ${{ inputs.max-inline-comments }}
+        FIX_BRIEF: ${{ inputs.fix-brief }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_HEAD: ${{ github.head_ref }}
+        PR_BASE: ${{ github.base_ref }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/prsignals"
+        node --experimental-strip-types "$ACTION_PATH/scripts/prsignals.ts" --diff "$out/pr.diff" --out-dir "$out"
+        echo "review_path=$out/review.md" >> "$GITHUB_OUTPUT"
+        if [ -f "$out/fix-brief.md" ]; then
+          echo "has_brief=true" >> "$GITHUB_OUTPUT"
+          echo "brief_path=$out/fix-brief.md" >> "$GITHUB_OUTPUT"
+        fi
+        echo "review_payload_path=$out/review-payload.json" >> "$GITHUB_OUTPUT"
+
+    - name: Upload fix brief
+      id: upload
+      if: steps.review.outputs.has_brief == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: fix-brief-pr-${{ github.event.pull_request.number }}
+        path: ${{ steps.review.outputs.brief_path }}
+        retention-days: 14
+
+    - name: Post review comment
+      if: inputs.post-comment == 'true' && github.event.pull_request
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REVIEW: ${{ steps.review.outputs.review_path }}
+        REVIEW_PAYLOAD: ${{ steps.review.outputs.review_payload_path }}
+        BRIEF_URL: ${{ steps.upload.outputs.artifact-url }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        if [ -n "${BRIEF_URL:-}" ]; then
+          printf '\n\n**Fix brief for an AI assistant:** [download fix-brief.md](%s)\n' "$BRIEF_URL" >> "$REVIEW"
+        fi
+        gh pr comment "$PR_NUMBER" --body-file "$REVIEW"
+        # GitHub rejects an empty review; the summary comment above still posts.
+        if [ -s "$REVIEW_PAYLOAD" ] && [ "$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).comments.length)' "$REVIEW_PAYLOAD")" -gt 0 ]; then
+          gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input "$REVIEW_PAYLOAD"
+        fi
