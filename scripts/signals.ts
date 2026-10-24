@@ -36,17 +36,49 @@ export interface GitHubReviewPayload {
   comments: GitHubReviewComment[];
 }
 
-const categories = new Set<SignalCategory>([
-  "security", "quality", "maintainability", "performance", "architecture",
-  "testing", "documentation", "compliance",
-]);
+const CATEGORIES = new Set(["security", "quality", "maintainability", "performance", "architecture", "testing", "documentation", "compliance"]);
+const SEVERITIES = new Set(["critical", "high", "medium", "low", "info"]);
 const severities: SignalSeverity[] = ["critical", "high", "medium", "low", "info"];
 const icons: Record<SignalSeverity, string> = {
   critical: "🚨", high: "⚠️", medium: "🔶", low: "💡", info: "ℹ️",
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function toInt(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return undefined;
+}
+function toConfidence(value: unknown): number | undefined {
+  let n: unknown = typeof value === "string" ? Number(value.replace(/%\s*$/, "")) : value;
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return undefined;
+  if (n > 1 && n <= 100) n = n / 100;
+  return (n as number) <= 1 ? (n as number) : undefined;
+}
+function toText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (Array.isArray(value)) {
+    const parts = value.filter((item): item is string => typeof item === "string" && item.trim() !== "").map((item) => item.trim());
+    return parts.length ? parts.join(" ") : undefined;
+  }
+  return undefined;
+}
+
+export function normalizeSignal(row: Record<string, unknown>, index: number): Signal | null {
+  const category = typeof row.category === "string" ? row.category.toLowerCase() : "";
+  const severity = typeof row.severity === "string" ? row.severity.toLowerCase() : "";
+  const file = toText(row.file), title = toText(row.title), description = toText(row.description), line = toInt(row.line);
+  if (!CATEGORIES.has(category) || !SEVERITIES.has(severity) || !file || !title || !description || !line || line < 1) return null;
+  const endLine = toInt(row.endLine);
+  const suggestion = typeof row.suggestion === "string" && row.suggestion.trim() ? row.suggestion : undefined;
+  const references = Array.isArray(row.references) ? row.references.filter((item): item is string => typeof item === "string") : undefined;
+  return {
+    id: toText(row.id) ?? `S${index + 1}`,
+    category: category as Signal["category"], severity: severity as Signal["severity"],
+    confidence: toConfidence(row.confidence) ?? 0.5,
+    file, line, endLine: endLine !== undefined && endLine > line ? endLine : undefined,
+    title, description, recommendation: toText(row.recommendation), suggestion,
+    ruleId: toText(row.ruleId), references,
+  };
 }
 
 export interface ParseResult { ok: boolean; signals: Signal[]; dropped: number }
@@ -55,34 +87,19 @@ export interface ParseResult { ok: boolean; signals: Signal[]; dropped: number }
 export function parseResponse(response: string): ParseResult {
   const text = response.trim().replace(/^```(?:json)?\s*|\s*```$/gi, "");
   let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch {
+  try { data = JSON.parse(text); } catch {
     const match = text.match(/\{[\s\S]*\}/);
     if (!match) return { ok: false, signals: [], dropped: 0 };
-    try {
-      data = JSON.parse(match[0]);
-    } catch {
-      return { ok: false, signals: [], dropped: 0 };
-    }
+    try { data = JSON.parse(match[0]); } catch { return { ok: false, signals: [], dropped: 0 }; }
   }
   const rows = Array.isArray(data) ? data
     : typeof data === "object" && data !== null ? (data as Record<string, unknown>).signals : undefined;
   if (!Array.isArray(rows)) return { ok: false, signals: [], dropped: 0 };
-
   const signals: Signal[] = [];
-  rows.forEach((row) => {
-    if (!isRecord(row)) return;
-    const valid = typeof row.id === "string" && !!row.id.trim()
-      && typeof row.file === "string" && !!row.file.trim()
-      && typeof row.title === "string" && !!row.title.trim()
-      && typeof row.description === "string" && !!row.description.trim()
-      && categories.has(row.category as SignalCategory)
-      && severities.includes(row.severity as SignalSeverity)
-      && typeof row.confidence === "number" && Number.isFinite(row.confidence)
-      && row.confidence >= 0 && row.confidence <= 1
-      && Number.isInteger(row.line) && (row.line as number) > 0;
-    if (valid) signals.push({ ...row } as unknown as Signal);
+  rows.forEach((row, index) => {
+    const signal = typeof row === "object" && row !== null && !Array.isArray(row)
+      ? normalizeSignal(row as Record<string, unknown>, index) : null;
+    if (signal) signals.push(signal);
   });
   return { ok: true, signals, dropped: rows.length - signals.length };
 }
@@ -143,7 +160,10 @@ function shorten(value: string, length: number): string {
 
 /** Filter, deduplicate, rank, and build the GitHub create-review payload. */
 export function githubReviewPayload(
-  signals: Signal[], minimumConfidence = 0.85, maxComments = Number.POSITIVE_INFINITY,
+  signals: Signal[],
+  minimumConfidence = 0.85,
+  maxComments = Number.POSITIVE_INFINITY,
+  render: (signal: Signal) => string = renderSignal,
 ): GitHubReviewPayload {
   const unique = new Map<string, Signal>();
   for (const signal of signals) {
@@ -163,7 +183,7 @@ export function githubReviewPayload(
     event: "COMMENT",
     body: "PRSignals review findings.",
     comments: (maxComments > 0 ? ordered.slice(0, maxComments) : ordered).map((signal) => ({
-      path: signal.file, line: signal.line, side: "RIGHT", body: renderSignal(signal),
+      path: signal.file, line: signal.line, side: "RIGHT", body: render(signal),
     })),
   };
 }

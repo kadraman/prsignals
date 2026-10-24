@@ -287,11 +287,17 @@ async function main(): Promise<number> {
     return 1;
   }
   const signals: Signal[] = outcomes.flatMap((o) => o.signals);
+  const safeRender = (signal: Signal): string => {
+    try { return renderSignal(signal); }
+    catch (error) {
+      return `**${signal.title}** (${signal.file}:${signal.line}): could not render details (${error instanceof Error ? error.message : String(error)})`;
+    }
+  };
   const nothingFound = failed.length === 0
     ? "No actionable signals found."
     : "No actionable signals found in the parts that were reviewed.";
-  const final = signals.length ? signals.map((signal) => renderSignal(signal)).join("\n\n") : nothingFound;
-  const payload = githubReviewPayload(signals, minimumConfidence, maxInlineComments);
+  const final = signals.length ? signals.map((signal) => safeRender(signal)).join("\n\n") : nothingFound;
+  const payload = githubReviewPayload(signals, minimumConfidence, maxInlineComments, safeRender);
   writeFileSync(join(args.outDir, "review-payload.json"), JSON.stringify(payload, null, 2));
   const footer = [`_Reviewed ${pieces.length} diff pieces in ${batches.length} API call(s) with \`${model}\` (${provider})._`];
   if (skipped.length) footer.push(`Skipped: ${skipped.join(", ")}`);
