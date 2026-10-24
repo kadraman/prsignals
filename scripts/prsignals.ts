@@ -4,7 +4,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { githubReviewPayload, parseSignals, renderSignal, type Signal } from "./signals.ts";
+import { githubReviewPayload, parseResponse, renderSignal, type Signal } from "./signals.ts";
 
 const VERSION = "1.0.0";
 const DEFAULT_BASE: Record<string, string> = {
@@ -129,7 +129,8 @@ function batchPrompt(ctx: Context, index: number, total: number, batch: Piece[])
   return `PR title: ${ctx.title}\nPR description: ${ctx.body}\n\nThis is part ${index} of ${total} of the diff. Other parts are reviewed separately, so do not complain about missing context from other files.\nFiles in this part:\n${batch.map((p) => `- ${p.label}`).join("\n")}\n\nDiff:\n\n${batch.map((p) => p.text).join("\n")}`;
 }
 type Context = { title: string; body: string; pr: string; repo: string; head: string; base: string };
-type Outcome = { text: string; ok: boolean };
+type Outcome = { ok: boolean; text: string; signals: Signal[]; dropped: number; files: string[] };
+const JSON_RETRY_SUFFIX = "\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON object {\"signals\": [...]}, no prose and no code fences.";
 async function reviewBatches(config: LlmConfig, ctx: Context, batches: Piece[][], workers: number): Promise<Outcome[]> {
   const outcomes: Outcome[] = new Array(batches.length);
   let next = 0;
@@ -138,16 +139,35 @@ async function reviewBatches(config: LlmConfig, ctx: Context, batches: Piece[][]
       const position = next++;
       if (position >= batches.length) return;
       const batch = batches[position];
+      const files = batch.map((p) => p.label);
       console.log(`Batch ${position + 1}/${batches.length}: sending ${batch.length} diff piece(s) to ${config.model}...`);
       try {
-        const text = await chat(
-          ...config.args, REVIEW_SYSTEM, batchPrompt(ctx, position + 1, batches.length, batch));
-        outcomes[position] = { text, ok: true };
+        const prompt = batchPrompt(ctx, position + 1, batches.length, batch);
+        let text = await chat(...config.args, REVIEW_SYSTEM, prompt);
+        let parsed = parseResponse(text);
+        if (!parsed.ok) {
+          console.warn(`Batch ${position + 1}/${batches.length}: invalid JSON; retrying once.`);
+          text = await chat(...config.args, REVIEW_SYSTEM, prompt + JSON_RETRY_SUFFIX);
+          parsed = parseResponse(text);
+        }
+        if (!parsed.ok) {
+          outcomes[position] = {
+            ok: false,
+            text: `**Review failed for this part** (model did not return valid JSON). Files: ${files.join(", ")}`,
+            signals: [], dropped: 0, files,
+          };
+          console.error(`Batch ${position + 1}/${batches.length}: failed: model did not return valid JSON`);
+          continue;
+        }
+        outcomes[position] = {
+          ok: true, text, signals: parsed.signals, dropped: parsed.dropped, files,
+        };
         console.log(`Batch ${position + 1}/${batches.length}: response received (${text.length} characters).`);
       } catch (error) {
         outcomes[position] = {
-          text: `**Review failed for this part** (${error instanceof Error ? error.message : String(error)}). Files: ${batch.map((p) => p.label).join(", ")}`,
           ok: false,
+          text: `**Review failed for this part** (${error instanceof Error ? error.message : String(error)}). Files: ${files.join(", ")}`,
+          signals: [], dropped: 0, files,
         };
         console.error(`Batch ${position + 1}/${batches.length}: failed: ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -260,19 +280,28 @@ async function main(): Promise<number> {
     envInt("LLM_MAX_OUTPUT_TOKENS", 8192), Number(env("LLM_RETRY_DELAY", "3"))] };
   console.log(`${pieces.length} diff pieces -> ${batches.length} batch(es) [${provider}, ${model}]`);
   const outcomes = await reviewBatches(config, ctx, batches, workers);
-  const failures = outcomes.filter((item) => !item.ok).length;
-  if (failures === outcomes.length) {
+  const failed = outcomes.filter((o) => !o.ok);
+  if (failed.length === outcomes.length) {
     writeFileSync(reviewPath, `## prsignals\n\n${outcomes.map((item) => item.text).join("\n\n")}\n`);
     console.error(`Every batch failed; nothing to report:\n${outcomes.map((item) => item.text).join("\n")}`);
     return 1;
   }
-  const signals: Signal[] = outcomes.filter((item) => item.ok).flatMap((item) => parseSignals(item.text));
-  const final = signals.length ? signals.map((signal) => renderSignal(signal)).join("\n\n") : "No actionable signals found.";
+  const signals: Signal[] = outcomes.flatMap((o) => o.signals);
+  const nothingFound = failed.length === 0
+    ? "No actionable signals found."
+    : "No actionable signals found in the parts that were reviewed.";
+  const final = signals.length ? signals.map((signal) => renderSignal(signal)).join("\n\n") : nothingFound;
   const payload = githubReviewPayload(signals, minimumConfidence, maxInlineComments);
   writeFileSync(join(args.outDir, "review-payload.json"), JSON.stringify(payload, null, 2));
   const footer = [`_Reviewed ${pieces.length} diff pieces in ${batches.length} API call(s) with \`${model}\` (${provider})._`];
   if (skipped.length) footer.push(`Skipped: ${skipped.join(", ")}`);
   if (unreviewed.length) footer.push(`**Not reviewed (exceeded MAX_BATCHES=${maxBatches}):** ${unreviewed.join(", ")}`);
+  if (failed.length) {
+    footer.push(`**Not reviewed (${failed.length} of ${outcomes.length} parts failed):** ${failed.flatMap((o) => o.files).join(", ")}`);
+    console.log(`::warning::${failed.length} of ${outcomes.length} review parts failed; see the review footer.`);
+  }
+  const dropped = outcomes.reduce((sum, o) => sum + o.dropped, 0);
+  if (dropped) footer.push(`${dropped} malformed signal(s) were discarded.`);
   let output = `## prsignals\n\n${final}\n\n---\n${footer.join("\n\n")}`;
   if (env("FIX_BRIEF", "true").toLowerCase() === "true" && !flags.has("--no-fix-brief")) {
     const brief = await makeFixBrief(config, ctx, final);

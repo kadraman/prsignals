@@ -49,27 +49,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Parse and validate the model's JSON response, accepting Markdown fences. */
-export function parseSignals(response: string): Signal[] {
-  let candidate = response.trim().replace(/^```(?:json)?\s*|\s*```$/gi, "");
+export interface ParseResult { ok: boolean; signals: Signal[]; dropped: number }
+
+/** ok=false: the reply was not usable JSON. ok=true with no signals: a valid "nothing found". */
+export function parseResponse(response: string): ParseResult {
+  const text = response.trim().replace(/^```(?:json)?\s*|\s*```$/gi, "");
   let data: unknown;
   try {
-    data = JSON.parse(candidate);
+    data = JSON.parse(text);
   } catch {
-    const match = candidate.match(/\{[\s\S]*\}/);
-    if (!match) return [];
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return { ok: false, signals: [], dropped: 0 };
     try {
       data = JSON.parse(match[0]);
     } catch {
-      return [];
+      return { ok: false, signals: [], dropped: 0 };
     }
   }
-  const rows: unknown = Array.isArray(data) ? data : isRecord(data) ? data.signals : [];
-  if (!Array.isArray(rows)) return [];
+  const rows = Array.isArray(data) ? data
+    : typeof data === "object" && data !== null ? (data as Record<string, unknown>).signals : undefined;
+  if (!Array.isArray(rows)) return { ok: false, signals: [], dropped: 0 };
 
-  return rows.filter((row): row is Record<string, unknown> => {
-    if (!isRecord(row)) return false;
-    return typeof row.id === "string" && !!row.id.trim()
+  const signals: Signal[] = [];
+  rows.forEach((row) => {
+    if (!isRecord(row)) return;
+    const valid = typeof row.id === "string" && !!row.id.trim()
       && typeof row.file === "string" && !!row.file.trim()
       && typeof row.title === "string" && !!row.title.trim()
       && typeof row.description === "string" && !!row.description.trim()
@@ -78,8 +82,12 @@ export function parseSignals(response: string): Signal[] {
       && typeof row.confidence === "number" && Number.isFinite(row.confidence)
       && row.confidence >= 0 && row.confidence <= 1
       && Number.isInteger(row.line) && (row.line as number) > 0;
-  }).map((row) => ({ ...row } as unknown as Signal));
+    if (valid) signals.push({ ...row } as unknown as Signal);
+  });
+  return { ok: true, signals, dropped: rows.length - signals.length };
 }
+
+export function parseSignals(response: string): Signal[] { return parseResponse(response).signals; }
 
 /** Render one concise, bounded GitHub review comment. */
 export function renderSignal(signal: Signal, maxLength = 800): string {
