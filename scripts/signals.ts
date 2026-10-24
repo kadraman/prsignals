@@ -27,6 +27,8 @@ export interface GitHubReviewComment {
   path: string;
   line: number;
   side: "RIGHT";
+  start_line?: number;
+  start_side?: "RIGHT";
   body: string;
 }
 
@@ -118,11 +120,12 @@ export function renderSignal(signal: Signal, maxLength = 800): string {
   const lineRange = Number.isInteger(signal.endLine) && (signal.endLine as number) >= signal.line
     ? `${signal.line}-${signal.endLine}` : `${signal.line}`;
   const location = `**Location:** \`${signal.file.replace(/`/g, "\\`")}:${lineRange}\``;
+  const suggestionFence = suggestion.includes("```") ? "````" : "```";
 
   const compose = (includeSuggestion: boolean) => {
     const parts = [header, "", `**${title}**`, "", location, "", description];
     if (recommendation) parts.push("", `**Recommendation:** ${recommendation}`);
-    if (includeSuggestion && suggestion) parts.push("", "```suggestion", suggestion, "```");
+    if (includeSuggestion && suggestion) parts.push("", `${suggestionFence}suggestion`, suggestion, suggestionFence);
     if (suggestionNote) parts.push("", suggestionNote);
     parts.push("", confidence);
     return parts.join("\n");
@@ -158,6 +161,15 @@ function shorten(value: string, length: number): string {
   return `${value.slice(0, length - 1).trimEnd()}…`;
 }
 
+export function toReviewComment(signal: Signal, body: string): GitHubReviewComment {
+  const range = signal.endLine !== undefined && signal.endLine > signal.line;
+  const comment: GitHubReviewComment = {
+    path: signal.file, line: range ? (signal.endLine as number) : signal.line, side: "RIGHT", body,
+  };
+  if (range) { comment.start_line = signal.line; comment.start_side = "RIGHT"; }
+  return comment;
+}
+
 /** Filter, deduplicate, rank, and build the GitHub create-review payload. */
 export function githubReviewPayload(
   signals: Signal[],
@@ -182,9 +194,8 @@ export function githubReviewPayload(
   return {
     event: "COMMENT",
     body: "PRSignals review findings.",
-    comments: (maxComments > 0 ? ordered.slice(0, maxComments) : ordered).map((signal) => ({
-      path: signal.file, line: signal.line, side: "RIGHT", body: render(signal),
-    })),
+    comments: (maxComments > 0 ? ordered.slice(0, maxComments) : ordered).map((signal) =>
+      toReviewComment(signal, render(signal))),
   };
 }
 
