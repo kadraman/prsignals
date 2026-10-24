@@ -146,8 +146,11 @@ if [ "$POST" -eq 1 ]; then
   INLINE_COUNT="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).comments.length)' "$OUT/review-payload.json")"
   if [ -s "$OUT/review-payload.json" ] && [ "$INLINE_COUNT" -gt 0 ]; then
     echo "Posting $INLINE_COUNT inline comment(s) and suggestions..."
-    gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$OUT/review-payload.json" >/dev/null
-    echo "Posted inline Signal comments and suggestions."
+    if ! gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$OUT/review-payload.json" >/dev/null; then
+      echo "::warning::Inline review failed; posting summary comment only."
+    else
+      echo "Posted inline Signal comments and suggestions."
+    fi
   else
     echo "No inline Signals met the confidence threshold; posted the summary only."
   fi

@@ -162,6 +162,9 @@ runs:
         fi
         gh pr comment "$PR_NUMBER" --body-file "$REVIEW"
         # GitHub rejects an empty review; the summary comment above still posts.
+        # A 422 on any comment aborts the whole review — fall back without failing the step.
         if [ -s "$REVIEW_PAYLOAD" ] && [ "$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).comments.length)' "$REVIEW_PAYLOAD")" -gt 0 ]; then
-          gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input "$REVIEW_PAYLOAD"
+          if ! gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input "$REVIEW_PAYLOAD"; then
+            echo "::warning::Inline review failed; posting summary comment only."
+          fi
         fi
