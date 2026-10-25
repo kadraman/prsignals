@@ -7,6 +7,6 @@
   },
   "scripts": {
     "review": "node --experimental-strip-types scripts/prsignals.ts",
-    "test": "node --experimental-strip-types --test scripts/patch.test.ts scripts/patch-e2e.test.ts"
+    "test": "node --experimental-strip-types --test scripts/*.test.ts"
   }
 }

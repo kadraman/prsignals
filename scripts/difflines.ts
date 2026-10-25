@@ -1,6 +1,6 @@
 import type { Signal } from "./signals.ts";
 
-export interface FileLines { added: Set<number>; context: Set<number> }
+export interface FileLines { added: Set<number>; context: Set<number>; text: Map<number, string> }
 export type LineMap = Map<string, FileLines>;
 
 const HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
@@ -25,7 +25,7 @@ export function parseDiffLines(diff: string): LineMap {
     if (!inHunk && line.startsWith("+++ ")) {
       const target = line.slice(4);
       if (target.trim() === "/dev/null") { current = null; return; }
-      current = { added: new Set(), context: new Set() };
+      current = { added: new Set(), context: new Set(), text: new Map() };
       map.set(cleanPath(target), current);
       return;
     }
@@ -33,12 +33,17 @@ export function parseDiffLines(diff: string): LineMap {
     if (hunk) { inHunk = true; newLine = Number(hunk[1]); return; }
     if (!inHunk || !current) return;
     const marker = line[0];
-    if (marker === "+") current.added.add(newLine++);
-    else if (marker === " ") current.context.add(newLine++);
-    else if (line === "" && index < lines.length - 1) current.context.add(newLine++); // blank context line whose space was stripped
+    if (marker === "+") { current.added.add(newLine); current.text.set(newLine, line.slice(1)); newLine++; }
+    else if (marker === " ") { current.context.add(newLine); current.text.set(newLine, line.slice(1)); newLine++; }
+    else if (line === "" && index < lines.length - 1) { current.context.add(newLine); current.text.set(newLine, ""); newLine++; } // blank context line whose space was stripped
     // "-" (removed) and "\" ("No newline at end of file") consume no new-file line
   });
   return map;
+}
+
+/** Find the diff path a model-reported file name refers to (tolerates "./" and "a/" "b/" prefixes). */
+export function resolvePath(map: LineMap, file: string): string | undefined {
+  return [file, file.replace(/^\.\//, ""), file.replace(/^[ab]\//, "")].find((candidate) => map.has(candidate));
 }
 
 /** Prefix every added/context line with its new-file line number so the model never has to count. */
@@ -62,8 +67,7 @@ export function annotateDiff(fileDiff: string): string {
 export function anchorSignals(signals: Signal[], map: LineMap): { anchored: Signal[]; unanchored: Signal[] } {
   const anchored: Signal[] = [], unanchored: Signal[] = [];
   for (const signal of signals) {
-    const path = [signal.file, signal.file.replace(/^\.\//, ""), signal.file.replace(/^[ab]\//, "")]
-      .find((candidate) => map.has(candidate));
+    const path = resolvePath(map, signal.file);
     const lines = path ? map.get(path) : undefined;
     const commentable = (n: number) => !!lines && (lines.added.has(n) || lines.context.has(n));
     if (!path || !lines || !commentable(signal.line)) { unanchored.push(signal); continue; }
