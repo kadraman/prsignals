@@ -120,7 +120,7 @@ export function renderSignal(signal: Signal, maxLength = 800): string {
   const lineRange = Number.isInteger(signal.endLine) && (signal.endLine as number) >= signal.line
     ? `${signal.line}-${signal.endLine}` : `${signal.line}`;
   const location = `**Location:** \`${signal.file.replace(/`/g, "\\`")}:${lineRange}\``;
-  const suggestionFence = suggestion.includes("```") ? "````" : "```";
+  const suggestionFence = fenceFor(suggestion);
 
   const compose = (includeSuggestion: boolean) => {
     const parts = [header, "", `**${title}**`, "", location, "", description];
@@ -161,6 +161,13 @@ function shorten(value: string, length: number): string {
   return `${value.slice(0, length - 1).trimEnd()}…`;
 }
 
+/** Choose a markdown fence longer than any backtick run inside the suggestion body. */
+function fenceFor(text: string): string {
+  const runs = text.match(/`+/g);
+  const longest = runs ? Math.max(...runs.map((run) => run.length)) : 0;
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
 export function toReviewComment(signal: Signal, body: string): GitHubReviewComment {
   const range = signal.endLine !== undefined && signal.endLine > signal.line;
   const comment: GitHubReviewComment = {
@@ -170,19 +177,74 @@ export function toReviewComment(signal: Signal, body: string): GitHubReviewComme
   return comment;
 }
 
+function signalFingerprint(signal: Signal): string {
+  return JSON.stringify([signal.file, signal.line, signal.category, signal.title]);
+}
+
+function signalBullet(signal: Signal): string {
+  const icon = icons[signal.severity];
+  const range = Number.isInteger(signal.endLine) && (signal.endLine as number) > signal.line
+    ? `${signal.line}-${signal.endLine}` : `${signal.line}`;
+  const title = signal.title.replace(/\s+/g, " ").trim();
+  return `- ${icon} **${title}** (\`${signal.file}:${range}\`)`;
+}
+
+/** Build the create-review overview body shown above the inline comment threads. */
+export function reviewOverviewBody(
+  inline: Signal[],
+  minimumConfidence: number,
+  leftovers: Signal[] = [],
+): string {
+  const parts = ["## PRSignals review", ""];
+  if (!inline.length) {
+    parts.push(`No inline findings met the confidence threshold (≥ ${minimumConfidence}).`, "");
+  } else {
+    const bySeverity = new Map<SignalSeverity, number>();
+    for (const signal of inline) {
+      bySeverity.set(signal.severity, (bySeverity.get(signal.severity) ?? 0) + 1);
+    }
+    const counts = severities
+      .filter((severity) => bySeverity.has(severity))
+      .map((severity) => `| ${severity} | ${bySeverity.get(severity)} |`);
+    parts.push(
+      `${inline.length} inline finding${inline.length === 1 ? "" : "s"} (confidence ≥ ${minimumConfidence}).`,
+      "",
+      "| Severity | Count |",
+      "|---|---|",
+      ...counts,
+      "",
+      ...inline.map(signalBullet),
+      "",
+    );
+  }
+  if (leftovers.length) {
+    parts.push(
+      "### Also noted (not inline)",
+      "",
+      ...leftovers.map(signalBullet),
+      "",
+      "_Below the inline confidence threshold, not anchorable on the diff, or beyond the inline comment cap._",
+    );
+  }
+  return parts.join("\n").trimEnd() + "\n";
+}
+
 /** Filter, deduplicate, rank, and build the GitHub create-review payload. */
 export function githubReviewPayload(
-  signals: Signal[],
+  anchored: Signal[],
   minimumConfidence = 0.85,
   maxComments = Number.POSITIVE_INFINITY,
   render: (signal: Signal) => string = renderSignal,
+  unanchored: Signal[] = [],
 ): GitHubReviewPayload {
+  const belowConfidence: Signal[] = [];
   const unique = new Map<string, Signal>();
-  for (const signal of signals) {
-    if (signal.confidence < minimumConfidence) continue;
-    const fingerprint = JSON.stringify([
-      signal.file, signal.line, signal.category, signal.title,
-    ]);
+  for (const signal of anchored) {
+    if (signal.confidence < minimumConfidence) {
+      belowConfidence.push(signal);
+      continue;
+    }
+    const fingerprint = signalFingerprint(signal);
     if (!unique.has(fingerprint)) unique.set(fingerprint, signal);
   }
   const ordered = [...unique.values()].sort((a, b) =>
@@ -191,11 +253,13 @@ export function githubReviewPayload(
     || a.file.localeCompare(b.file)
     || a.line - b.line
     || a.title.localeCompare(b.title));
+  const inline = maxComments > 0 ? ordered.slice(0, maxComments) : ordered;
+  const capped = maxComments > 0 ? ordered.slice(maxComments) : [];
+  const leftovers = [...unanchored, ...belowConfidence, ...capped];
   return {
     event: "COMMENT",
-    body: "PRSignals review findings.",
-    comments: (maxComments > 0 ? ordered.slice(0, maxComments) : ordered).map((signal) =>
-      toReviewComment(signal, render(signal))),
+    body: reviewOverviewBody(inline, minimumConfidence, leftovers),
+    comments: inline.map((signal) => toReviewComment(signal, render(signal))),
   };
 }
 

@@ -157,14 +157,39 @@ runs:
         REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
-        if [ -n "${BRIEF_URL:-}" ]; then
-          printf '\n\n**Fix brief for an AI assistant:** [download fix-brief.md](%s)\n' "$BRIEF_URL" >> "$REVIEW"
-        fi
-        gh pr comment "$PR_NUMBER" --body-file "$REVIEW"
-        # GitHub rejects an empty review; the summary comment above still posts.
-        # A 422 on any comment aborts the whole review — fall back without failing the step.
-        if [ -s "$REVIEW_PAYLOAD" ] && [ "$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).comments.length)' "$REVIEW_PAYLOAD")" -gt 0 ]; then
-          if ! gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input "$REVIEW_PAYLOAD"; then
-            echo "::warning::Inline review failed; posting summary comment only."
+        append_brief_to_review() {
+          if [ -n "${BRIEF_URL:-}" ]; then
+            printf '\n\n**Fix brief for an AI assistant:** [download fix-brief.md](%s)\n' "$BRIEF_URL" >> "$REVIEW"
           fi
+        }
+        append_brief_to_payload() {
+          if [ -n "${BRIEF_URL:-}" ]; then
+            node --input-type=module -e '
+              import { readFileSync, writeFileSync } from "node:fs";
+              const path = process.argv[1], url = process.argv[2];
+              const payload = JSON.parse(readFileSync(path, "utf8"));
+              payload.body = `${payload.body.trimEnd()}\n\n**Fix brief for an AI assistant:** [download fix-brief.md](${url})\n`;
+              writeFileSync(path, JSON.stringify(payload, null, 2));
+            ' "$REVIEW_PAYLOAD" "$BRIEF_URL"
+          fi
+        }
+        INLINE_COUNT=0
+        if [ -s "$REVIEW_PAYLOAD" ]; then
+          INLINE_COUNT="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync(process.argv[1], "utf8")).comments.length)' "$REVIEW_PAYLOAD")"
+        fi
+        # Prefer a single PR review (overview + inline threads). Fall back to a summary
+        # issue comment when there are no inline findings, or if create-review fails.
+        if [ "$INLINE_COUNT" -gt 0 ]; then
+          append_brief_to_payload
+          if gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input "$REVIEW_PAYLOAD"; then
+            echo "Posted PR review with $INLINE_COUNT inline comment(s)."
+          else
+            echo "::warning::Inline review failed; posting summary comment only."
+            append_brief_to_review
+            gh pr comment "$PR_NUMBER" --body-file "$REVIEW"
+          fi
+        else
+          append_brief_to_review
+          gh pr comment "$PR_NUMBER" --body-file "$REVIEW"
+          echo "No inline findings; posted summary comment only."
         fi

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseDiffLines, annotateDiff, anchorSignals } from "./difflines.ts";
-import { parseResponse, renderSignal, toReviewComment } from "./signals.ts";
+import { githubReviewPayload, parseResponse, renderSignal, reviewOverviewBody, toReviewComment } from "./signals.ts";
 
 const DIFF = [
   "diff --git a/a.py b/a.py", "index 111..222 100644", "--- a/a.py", "+++ b/a.py",
@@ -60,4 +60,59 @@ test("parseResponse: prose is not ok, empty array is ok, array recommendation su
   assert.equal(r.signals[0].line, 2); assert.equal(r.signals[0].confidence, 0.85);
   assert.equal(r.signals[0].recommendation, "do A do B");
   assert.doesNotThrow(() => renderSignal(r.signals[0]));
+});
+
+test("CRLF diffs match LF line maps and annotate blank context", () => {
+  const lf = [
+    "diff --git a/a.py b/a.py", "--- a/a.py", "+++ b/a.py",
+    "@@ -1,3 +1,3 @@", " keep", "", "+added",
+  ].join("\n");
+  const crlf = lf.replace(/\n/g, "\r\n");
+  const lfMap = parseDiffLines(lf);
+  const crlfMap = parseDiffLines(crlf);
+  assert.deepEqual(sorted(lfMap.get("a.py")!.added), sorted(crlfMap.get("a.py")!.added));
+  assert.deepEqual(sorted(lfMap.get("a.py")!.context), sorted(crlfMap.get("a.py")!.context));
+  assert.ok(annotateDiff(crlf).includes("    2  "));
+});
+
+test("anchorSignals drops absurd endLine without hanging", () => {
+  const m = parseDiffLines(DIFF);
+  const started = Date.now();
+  const r = anchorSignals([sig({ line: 2, endLine: 2_147_483_647, suggestion: "x" }) as any], m);
+  assert.ok(Date.now() - started < 1_000);
+  assert.equal(r.anchored.length, 1);
+  assert.equal(r.anchored[0].endLine, undefined);
+  assert.equal(r.anchored[0].suggestion, undefined);
+});
+
+test("renderSignal picks a fence longer than any backtick run in the suggestion", () => {
+  const body = renderSignal(sig({ suggestion: "use ````code```` here" }) as any, 2000);
+  assert.match(body, /\n`````suggestion\n/);
+  assert.match(body, /\n`````\n/);
+});
+
+test("review overview body summarizes inline findings and leftovers", () => {
+  const empty = reviewOverviewBody([], 0.85);
+  assert.match(empty, /No inline findings met the confidence threshold/);
+  const body = reviewOverviewBody([
+    sig({ severity: "high", title: "CRLF blank context", file: "scripts/difflines.ts", line: 34 }),
+    sig({ severity: "medium", title: "Fence length", file: "scripts/signals.ts", line: 128 }),
+  ] as any, 0.85, [sig({ confidence: 0.5, title: "Low confidence note", line: 99 }) as any]);
+  assert.match(body, /## PRSignals review/);
+  assert.match(body, /2 inline findings \(confidence ≥ 0\.85\)/);
+  assert.match(body, /\| high \| 1 \|/);
+  assert.match(body, /\| medium \| 1 \|/);
+  assert.match(body, /\*\*CRLF blank context\*\* \(`scripts\/difflines\.ts:34`\)/);
+  assert.match(body, /### Also noted \(not inline\)/);
+  assert.match(body, /\*\*Low confidence note\*\*/);
+  const payload = githubReviewPayload([
+    sig({ confidence: 0.9, title: "Keep" }),
+    sig({ confidence: 0.5, title: "Drop" }),
+  ] as any, 0.85, undefined, undefined, [sig({ file: "other.py", line: 1, title: "Unanchored", confidence: 0.9 }) as any]);
+  assert.match(payload.body, /1 inline finding/);
+  assert.match(payload.body, /\*\*Keep\*\*/);
+  assert.match(payload.body, /### Also noted \(not inline\)/);
+  assert.match(payload.body, /\*\*Drop\*\*/);
+  assert.match(payload.body, /\*\*Unanchored\*\*/);
+  assert.equal(payload.comments.length, 1);
 });

@@ -9,13 +9,17 @@ function cleanPath(raw: string): string {
   return raw.replace(/\t.*$/, "").trim().replace(/^"(.*)"$/, "$1").replace(/^b\//, "");
 }
 
+function splitDiffLines(text: string): string[] {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+}
+
 /** New-file (RIGHT side) line numbers that GitHub accepts review comments on. Run on the ORIGINAL diff. */
 export function parseDiffLines(diff: string): LineMap {
   const map: LineMap = new Map();
   let current: FileLines | null = null;
   let inHunk = false;
   let newLine = 0;
-  const lines = diff.split("\n");
+  const lines = splitDiffLines(diff);
   lines.forEach((line, index) => {
     if (line.startsWith("diff --git ")) { current = null; inHunk = false; return; }
     if (!inHunk && line.startsWith("+++ ")) {
@@ -41,7 +45,7 @@ export function parseDiffLines(diff: string): LineMap {
 export function annotateDiff(fileDiff: string): string {
   let inHunk = false;
   let newLine = 0;
-  const lines = fileDiff.split("\n");
+  const lines = splitDiffLines(fileDiff);
   return lines.map((line, index) => {
     if (line.startsWith("diff --git ")) { inHunk = false; return line; }
     const hunk = HUNK.exec(line);
@@ -65,7 +69,9 @@ export function anchorSignals(signals: Signal[], map: LineMap): { anchored: Sign
     if (!path || !lines || !commentable(signal.line)) { unanchored.push(signal); continue; }
     let { endLine, suggestion } = signal;
     if (endLine !== undefined) {
-      let valid = Number.isInteger(endLine) && endLine > signal.line;
+      const maxKnown = Math.max(0, ...lines.added, ...lines.context);
+      // Reject absurd / cross-file endLine before looping (untrusted model output).
+      let valid = Number.isInteger(endLine) && endLine > signal.line && endLine <= maxKnown;
       for (let n = signal.line; valid && n <= (endLine as number); n++) valid = commentable(n);
       if (!valid) { endLine = undefined; suggestion = undefined; } // a range suggestion is unsafe on a single line
     }
