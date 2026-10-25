@@ -141,17 +141,25 @@ echo "Review:     $OUT/review.md"
 [ ! -f "$OUT/fix-brief.md" ] || echo "Fix brief:  $OUT/fix-brief.md"
 
 if [ "$POST" -eq 1 ]; then
-  echo "Posting the summary comment..."
-  gh pr comment "$PR" ${GH_REPO[@]+"${GH_REPO[@]}"} --body-file "$OUT/review.md" >/dev/null
-  INLINE_COUNT="$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).comments.length)' "$OUT/review-payload.json")"
-  if [ -s "$OUT/review-payload.json" ] && [ "$INLINE_COUNT" -gt 0 ]; then
-    echo "Posting $INLINE_COUNT inline comment(s) and suggestions..."
-    gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$OUT/review-payload.json" >/dev/null
-    echo "Posted inline Signal comments and suggestions."
+  INLINE_COUNT=0
+  if [ -s "$OUT/review-payload.json" ]; then
+    INLINE_COUNT="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync(process.argv[1], "utf8")).comments.length)' "$OUT/review-payload.json")"
+  fi
+  # Prefer a single PR review (overview + inline threads). Fall back to a summary
+  # issue comment when there are no inline findings, or if create-review fails.
+  if [ "$INLINE_COUNT" -gt 0 ]; then
+    echo "Posting PR review with $INLINE_COUNT inline comment(s)..."
+    if gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$OUT/review-payload.json" >/dev/null; then
+      echo "Posted PR review with inline Signal comments."
+    else
+      echo "::warning::Inline review failed; posting summary comment only."
+      gh pr comment "$PR" ${GH_REPO[@]+"${GH_REPO[@]}"} --body-file "$OUT/review.md" >/dev/null
+    fi
   else
-    echo "No inline Signals met the confidence threshold; posted the summary only."
+    echo "No inline findings; posting summary comment only..."
+    gh pr comment "$PR" ${GH_REPO[@]+"${GH_REPO[@]}"} --body-file "$OUT/review.md" >/dev/null
   fi
   echo "Posted the review to $URL"
 else
-  echo "Not posted (re-run with --post to publish the summary and eligible inline comments)."
+  echo "Not posted (re-run with --post to publish the review)."
 fi

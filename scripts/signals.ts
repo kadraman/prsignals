@@ -27,6 +27,8 @@ export interface GitHubReviewComment {
   path: string;
   line: number;
   side: "RIGHT";
+  start_line?: number;
+  start_side?: "RIGHT";
   body: string;
 }
 
@@ -36,50 +38,75 @@ export interface GitHubReviewPayload {
   comments: GitHubReviewComment[];
 }
 
-const categories = new Set<SignalCategory>([
-  "security", "quality", "maintainability", "performance", "architecture",
-  "testing", "documentation", "compliance",
-]);
+const CATEGORIES = new Set(["security", "quality", "maintainability", "performance", "architecture", "testing", "documentation", "compliance"]);
+const SEVERITIES = new Set(["critical", "high", "medium", "low", "info"]);
 const severities: SignalSeverity[] = ["critical", "high", "medium", "low", "info"];
 const icons: Record<SignalSeverity, string> = {
   critical: "🚨", high: "⚠️", medium: "🔶", low: "💡", info: "ℹ️",
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function toInt(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return undefined;
 }
-
-/** Parse and validate the model's JSON response, accepting Markdown fences. */
-export function parseSignals(response: string): Signal[] {
-  let candidate = response.trim().replace(/^```(?:json)?\s*|\s*```$/gi, "");
-  let data: unknown;
-  try {
-    data = JSON.parse(candidate);
-  } catch {
-    const match = candidate.match(/\{[\s\S]*\}/);
-    if (!match) return [];
-    try {
-      data = JSON.parse(match[0]);
-    } catch {
-      return [];
-    }
+function toConfidence(value: unknown): number | undefined {
+  let n: unknown = typeof value === "string" ? Number(value.replace(/%\s*$/, "")) : value;
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return undefined;
+  if (n > 1 && n <= 100) n = n / 100;
+  return (n as number) <= 1 ? (n as number) : undefined;
+}
+function toText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (Array.isArray(value)) {
+    const parts = value.filter((item): item is string => typeof item === "string" && item.trim() !== "").map((item) => item.trim());
+    return parts.length ? parts.join(" ") : undefined;
   }
-  const rows: unknown = Array.isArray(data) ? data : isRecord(data) ? data.signals : [];
-  if (!Array.isArray(rows)) return [];
-
-  return rows.filter((row): row is Record<string, unknown> => {
-    if (!isRecord(row)) return false;
-    return typeof row.id === "string" && !!row.id.trim()
-      && typeof row.file === "string" && !!row.file.trim()
-      && typeof row.title === "string" && !!row.title.trim()
-      && typeof row.description === "string" && !!row.description.trim()
-      && categories.has(row.category as SignalCategory)
-      && severities.includes(row.severity as SignalSeverity)
-      && typeof row.confidence === "number" && Number.isFinite(row.confidence)
-      && row.confidence >= 0 && row.confidence <= 1
-      && Number.isInteger(row.line) && (row.line as number) > 0;
-  }).map((row) => ({ ...row } as unknown as Signal));
+  return undefined;
 }
+
+export function normalizeSignal(row: Record<string, unknown>, index: number): Signal | null {
+  const category = typeof row.category === "string" ? row.category.toLowerCase() : "";
+  const severity = typeof row.severity === "string" ? row.severity.toLowerCase() : "";
+  const file = toText(row.file), title = toText(row.title), description = toText(row.description), line = toInt(row.line);
+  if (!CATEGORIES.has(category) || !SEVERITIES.has(severity) || !file || !title || !description || !line || line < 1) return null;
+  const endLine = toInt(row.endLine);
+  const suggestion = typeof row.suggestion === "string" && row.suggestion.trim() ? row.suggestion : undefined;
+  const references = Array.isArray(row.references) ? row.references.filter((item): item is string => typeof item === "string") : undefined;
+  return {
+    id: toText(row.id) ?? `S${index + 1}`,
+    category: category as Signal["category"], severity: severity as Signal["severity"],
+    confidence: toConfidence(row.confidence) ?? 0.5,
+    file, line, endLine: endLine !== undefined && endLine > line ? endLine : undefined,
+    title, description, recommendation: toText(row.recommendation), suggestion,
+    ruleId: toText(row.ruleId), references,
+  };
+}
+
+export interface ParseResult { ok: boolean; signals: Signal[]; dropped: number }
+
+/** ok=false: the reply was not usable JSON. ok=true with no signals: a valid "nothing found". */
+export function parseResponse(response: string): ParseResult {
+  const text = response.trim().replace(/^```(?:json)?\s*|\s*```$/gi, "");
+  let data: unknown;
+  try { data = JSON.parse(text); } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return { ok: false, signals: [], dropped: 0 };
+    try { data = JSON.parse(match[0]); } catch { return { ok: false, signals: [], dropped: 0 }; }
+  }
+  const rows = Array.isArray(data) ? data
+    : typeof data === "object" && data !== null ? (data as Record<string, unknown>).signals : undefined;
+  if (!Array.isArray(rows)) return { ok: false, signals: [], dropped: 0 };
+  const signals: Signal[] = [];
+  rows.forEach((row, index) => {
+    const signal = typeof row === "object" && row !== null && !Array.isArray(row)
+      ? normalizeSignal(row as Record<string, unknown>, index) : null;
+    if (signal) signals.push(signal);
+  });
+  return { ok: true, signals, dropped: rows.length - signals.length };
+}
+
+export function parseSignals(response: string): Signal[] { return parseResponse(response).signals; }
 
 /** Render one concise, bounded GitHub review comment. */
 export function renderSignal(signal: Signal, maxLength = 800): string {
@@ -93,11 +120,12 @@ export function renderSignal(signal: Signal, maxLength = 800): string {
   const lineRange = Number.isInteger(signal.endLine) && (signal.endLine as number) >= signal.line
     ? `${signal.line}-${signal.endLine}` : `${signal.line}`;
   const location = `**Location:** \`${signal.file.replace(/`/g, "\\`")}:${lineRange}\``;
+  const suggestionFence = fenceFor(suggestion);
 
   const compose = (includeSuggestion: boolean) => {
     const parts = [header, "", `**${title}**`, "", location, "", description];
     if (recommendation) parts.push("", `**Recommendation:** ${recommendation}`);
-    if (includeSuggestion && suggestion) parts.push("", "```suggestion", suggestion, "```");
+    if (includeSuggestion && suggestion) parts.push("", `${suggestionFence}suggestion`, suggestion, suggestionFence);
     if (suggestionNote) parts.push("", suggestionNote);
     parts.push("", confidence);
     return parts.join("\n");
@@ -133,16 +161,90 @@ function shorten(value: string, length: number): string {
   return `${value.slice(0, length - 1).trimEnd()}…`;
 }
 
+/** Choose a markdown fence longer than any backtick run inside the suggestion body. */
+function fenceFor(text: string): string {
+  const runs = text.match(/`+/g);
+  const longest = runs ? Math.max(...runs.map((run) => run.length)) : 0;
+  return "`".repeat(Math.max(3, longest + 1));
+}
+
+export function toReviewComment(signal: Signal, body: string): GitHubReviewComment {
+  const range = signal.endLine !== undefined && signal.endLine > signal.line;
+  const comment: GitHubReviewComment = {
+    path: signal.file, line: range ? (signal.endLine as number) : signal.line, side: "RIGHT", body,
+  };
+  if (range) { comment.start_line = signal.line; comment.start_side = "RIGHT"; }
+  return comment;
+}
+
+function signalFingerprint(signal: Signal): string {
+  return JSON.stringify([signal.file, signal.line, signal.category, signal.title]);
+}
+
+function signalBullet(signal: Signal): string {
+  const icon = icons[signal.severity];
+  const range = Number.isInteger(signal.endLine) && (signal.endLine as number) > signal.line
+    ? `${signal.line}-${signal.endLine}` : `${signal.line}`;
+  const title = signal.title.replace(/\s+/g, " ").trim();
+  return `- ${icon} **${title}** (\`${signal.file}:${range}\`)`;
+}
+
+/** Build the create-review overview body shown above the inline comment threads. */
+export function reviewOverviewBody(
+  inline: Signal[],
+  minimumConfidence: number,
+  leftovers: Signal[] = [],
+): string {
+  const parts = ["## PRSignals review", ""];
+  if (!inline.length) {
+    parts.push(`No inline findings met the confidence threshold (≥ ${minimumConfidence}).`, "");
+  } else {
+    const bySeverity = new Map<SignalSeverity, number>();
+    for (const signal of inline) {
+      bySeverity.set(signal.severity, (bySeverity.get(signal.severity) ?? 0) + 1);
+    }
+    const counts = severities
+      .filter((severity) => bySeverity.has(severity))
+      .map((severity) => `| ${severity} | ${bySeverity.get(severity)} |`);
+    parts.push(
+      `${inline.length} inline finding${inline.length === 1 ? "" : "s"} (confidence ≥ ${minimumConfidence}).`,
+      "",
+      "| Severity | Count |",
+      "|---|---|",
+      ...counts,
+      "",
+      ...inline.map(signalBullet),
+      "",
+    );
+  }
+  if (leftovers.length) {
+    parts.push(
+      "### Also noted (not inline)",
+      "",
+      ...leftovers.map(signalBullet),
+      "",
+      "_Below the inline confidence threshold, not anchorable on the diff, or beyond the inline comment cap._",
+    );
+  }
+  return parts.join("\n").trimEnd() + "\n";
+}
+
 /** Filter, deduplicate, rank, and build the GitHub create-review payload. */
 export function githubReviewPayload(
-  signals: Signal[], minimumConfidence = 0.85, maxComments = Number.POSITIVE_INFINITY,
+  anchored: Signal[],
+  minimumConfidence = 0.85,
+  maxComments = Number.POSITIVE_INFINITY,
+  render: (signal: Signal) => string = renderSignal,
+  unanchored: Signal[] = [],
 ): GitHubReviewPayload {
+  const belowConfidence: Signal[] = [];
   const unique = new Map<string, Signal>();
-  for (const signal of signals) {
-    if (signal.confidence < minimumConfidence) continue;
-    const fingerprint = JSON.stringify([
-      signal.file, signal.line, signal.category, signal.title,
-    ]);
+  for (const signal of anchored) {
+    if (signal.confidence < minimumConfidence) {
+      belowConfidence.push(signal);
+      continue;
+    }
+    const fingerprint = signalFingerprint(signal);
     if (!unique.has(fingerprint)) unique.set(fingerprint, signal);
   }
   const ordered = [...unique.values()].sort((a, b) =>
@@ -151,12 +253,13 @@ export function githubReviewPayload(
     || a.file.localeCompare(b.file)
     || a.line - b.line
     || a.title.localeCompare(b.title));
+  const inline = maxComments > 0 ? ordered.slice(0, maxComments) : ordered;
+  const capped = maxComments > 0 ? ordered.slice(maxComments) : [];
+  const leftovers = [...unanchored, ...belowConfidence, ...capped];
   return {
     event: "COMMENT",
-    body: "PRSignals review findings.",
-    comments: (maxComments > 0 ? ordered.slice(0, maxComments) : ordered).map((signal) => ({
-      path: signal.file, line: signal.line, side: "RIGHT", body: renderSignal(signal),
-    })),
+    body: reviewOverviewBody(inline, minimumConfidence, leftovers),
+    comments: inline.map((signal) => toReviewComment(signal, render(signal))),
   };
 }
 
