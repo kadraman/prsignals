@@ -1,0 +1,46 @@
+name: Provider / model compatibility
+description: Report or track an LLM provider or model-specific quirk
+title: "[Provider]: "
+labels: ["provider", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when a specific host or model rejects requests, misformats JSON, or needs special config
+        (temperature, thinking mode, timeouts, base URL, etc.).
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider / API
+      placeholder: "e.g. DeepSeek, OpenRouter, Ollama, Anthropic, …"
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model id
+      placeholder: "Exact model string sent in LLM_MODEL"
+    validations:
+      required: true
+
+  - type: input
+    id: base-url
+    attributes:
+      label: LLM_BASE_URL (if any)
+      placeholder: "https://…"
+
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: Observed behaviour
+      description: Error message, empty responses, truncated output, thinking timeouts, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Workaround (if any)
+      description: "e.g. LLM_THINKING=disabled, lower BATCH_CHARS, omit temperature"

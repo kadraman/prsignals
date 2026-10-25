@@ -1,0 +1,54 @@
+name: Feature request
+description: Suggest an enhancement for PRSignals
+title: "[Feature]: "
+labels: ["enhancement", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem first, then the idea. Check existing issues before filing a duplicate.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that is awkward or impossible today?
+      placeholder: "e.g. I want reviews to respect a per-repo ignore list for generated files."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should PRSignals behave?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Review quality / prompts
+        - Signals / inline comments
+        - GitHub Action / workflow
+        - Local CLI scripts
+        - Providers / LLM config
+        - Fix brief
+        - Docs
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds or other approaches you already tried.
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Extra context
+      description: Links, screenshots, or examples (no private code).

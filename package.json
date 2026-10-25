@@ -6,6 +6,7 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "review": "node --experimental-strip-types scripts/prsignals.ts"
+    "review": "node --experimental-strip-types scripts/prsignals.ts",
+    "test": "node --experimental-strip-types --test scripts/patch.test.ts scripts/patch-e2e.test.ts"
   }
 }

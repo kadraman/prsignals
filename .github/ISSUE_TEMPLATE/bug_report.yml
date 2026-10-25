@@ -1,0 +1,71 @@
+name: Bug report
+description: Something isn't working as expected
+title: "[Bug]: "
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please fill in as much as you can — provider/model details especially help.
+        Do **not** paste API keys or private source diffs.
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where did this happen?
+      options:
+        - GitHub Action (workflow)
+        - Local (`scripts/review-pr.sh` / `review-pr.ps1`)
+        - Direct (`node … scripts/prsignals.ts`)
+        - Other / unsure
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: LLM provider
+      description: Protocol and host you configured.
+      placeholder: "e.g. openai + https://api.deepseek.com, or anthropic"
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      placeholder: "e.g. deepseek-v4-pro, gpt-4.1, claude-…"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Expected vs actual behaviour.
+      placeholder: Expected a review comment / got HTTP 400 / empty signals / …
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / error text
+      description: Redact secrets. Workflow job logs, stderr, or the review footer are ideal.
+      render: text
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Extra context
+      description: Node version, OS, action ref (`@v1` / commit SHA / `./`), PR size, anything else useful.

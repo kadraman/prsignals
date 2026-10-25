@@ -1,0 +1,41 @@
+# Self-review: runs this repo's composite action against its own PRs.
+#
+# Expects Settings > Secrets and variables > Actions:
+#   Secret    LLM_API_KEY
+#   Variable  LLM_MODEL      (required)
+#   Variable  LLM_PROVIDER   (optional; default openai)
+#   Variable  LLM_BASE_URL   (optional)
+# Optional Variables (passed through when set):
+#   LLM_MAX_OUTPUT_TOKENS, LLM_THINKING, LLM_REQUEST_TIMEOUT_MS
+
+name: prsignals
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    # Secrets aren't available to PRs from forks, so only review same-repo PRs.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      LLM_THINKING: ${{ vars.LLM_THINKING }}
+      LLM_REQUEST_TIMEOUT_MS: ${{ vars.LLM_REQUEST_TIMEOUT_MS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: ./
+        with:
+          api-key: ${{ secrets.LLM_API_KEY }}
+          model: ${{ vars.LLM_MODEL }}
+          provider: ${{ vars.LLM_PROVIDER || 'openai' }}
+          base-url: ${{ vars.LLM_BASE_URL }}
+          max-output-tokens: ${{ vars.LLM_MAX_OUTPUT_TOKENS || '8192' }}

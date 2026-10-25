@@ -269,7 +269,7 @@ async function main(): Promise<number> {
   const { pieces, skipped } = splitDiff(diff, batchChars);
   if (!pieces.length) {
     const note = `No reviewable changes found.${skipped.length ? ` Skipped: ${skipped.join(", ")}` : ""}`;
-    writeFileSync(reviewPath, `## prsignals\n\n${note}\n`);
+    writeFileSync(reviewPath, `## PRSignals\n\n${note}\n`);
     writeFileSync(join(args.outDir, "review-payload.json"), JSON.stringify(githubReviewPayload([]), null, 2));
     console.log(note); return 0;
   }
@@ -293,7 +293,7 @@ async function main(): Promise<number> {
   const outcomes = await reviewBatches(config, ctx, batches, workers);
   const failed = outcomes.filter((o) => !o.ok);
   if (failed.length === outcomes.length) {
-    writeFileSync(reviewPath, `## prsignals\n\n${outcomes.map((item) => item.text).join("\n\n")}\n`);
+    writeFileSync(reviewPath, `## PRSignals\n\n${outcomes.map((item) => item.text).join("\n\n")}\n`);
     console.error(`Every batch failed; nothing to report:\n${outcomes.map((item) => item.text).join("\n")}`);
     return 1;
   }
@@ -321,7 +321,7 @@ async function main(): Promise<number> {
   }
   const dropped = outcomes.reduce((sum, o) => sum + o.dropped, 0);
   if (dropped) footer.push(`${dropped} malformed signal(s) were discarded.`);
-  let output = `## prsignals\n\n${final}\n\n---\n${footer.join("\n\n")}`;
+  let output = `## PRSignals\n\n${final}\n\n---\n${footer.join("\n\n")}`;
   if (env("FIX_BRIEF", "true").toLowerCase() === "true" && !flags.has("--no-fix-brief")) {
     const brief = await makeFixBrief(config, ctx, final);
     if (brief) writeFileSync(briefPath, brief);
