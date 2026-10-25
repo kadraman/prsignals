@@ -45,7 +45,7 @@ scripts/review-pr.sh 123 --repo OWNER/NAME --provider anthropic --model <model-n
 ```
 
 Output goes to `./prsignals-out/pr-123/`: `review.md`, `fix-brief.md` (if anything was actionable), and the raw `pr.diff`.
-The renderer also writes `review-payload.json`, the GitHub review payload containing confidence-filtered inline comments.
+The renderer also writes `review-payload.json` (confidence-filtered inline GitHub review comments) and `signals.json` (every scored signal with its confidence breakdown).
 
 Notes:
 - Inside a clone of the repo you can omit `--repo`.
@@ -99,11 +99,13 @@ Model names change often. Check your provider's docs for the current ones.
 | `model` | required | model name |
 | `provider` | `openai` | `openai` or `anthropic` |
 | `base-url` | | API root override |
-| `temperature` | | blank = not sent (some models reject it) |
+| `temperature` | `0` | sampling temperature; set to `none` to omit the parameter (some models reject it) |
+| `consistency-runs` | `1` | independent review passes (1–5); later runs use `CONSISTENCY_TEMPERATURE` (default `0.4`) for agreement scoring |
 | `max-output-tokens` | `8192` | required by the Anthropic API |
-| `batch-chars` | `100000` | max diff characters per API call (~25k tokens); lower it for small-context models |
+| `batch-chars` | `100000` | max diff characters packed per API call (~25k tokens); lower it for small-context models |
+| `piece-chars` | `20000` | max characters per file piece before hunk-splitting; large files are split even when under `batch-chars` |
 | `max-batches` | `40` | cost guard; extra batches are listed as "not reviewed" |
-| `minimum-confidence` | `0.85` | minimum Signal confidence for inline comments |
+| `minimum-confidence` | `0.85` | confidence floor for inline comments; inline also requires severity `critical` or `high` (`medium`/`low`/`info` stay overview-only) |
 | `max-inline-comments` | `0` (all) | optional cap on inline comments; `0` means no cap |
 | `workers` | `3` | parallel API calls |
 | `fix-brief` | `true` | also produce `fix-brief.md` |
@@ -129,10 +131,10 @@ or paste/attach it in Copilot, Cursor, or a chat session. The brief tells the as
 ## How large diffs are handled
 
 1. Split the diff by file; lockfiles, minified files and binaries are skipped (and listed).
-2. A file larger than `batch-chars` is split on hunk boundaries (and on line boundaries inside giant hunks); every part keeps the file header.
-3. Pieces are packed into batches up to `batch-chars`.
-4. Each batch is reviewed in its own call (retrying 429/5xx/529 with backoff).
-5. Each response is parsed into the canonical Signal schema; inline comments are deduplicated by file, line, category, and title, filtered by confidence, then ranked by severity and confidence.
+2. A file larger than `piece-chars` (capped by `batch-chars`) is split on hunk boundaries (and on line boundaries inside giant hunks); every part keeps the file header. Split parts are reviewed alone so they are not packed back into one oversized call.
+3. Other pieces are packed into batches up to `batch-chars`.
+4. Each batch is reviewed in its own call (retrying 429/5xx/529 with backoff). If the model still returns invalid JSON (or the request fails), the batch is split further and retried up to two times.
+5. Each response is parsed into the canonical Signal schema. Confidence is computed in code from the model's high/medium/low level plus checked evidence (and optional agreement across consistency runs). Inline comments are deduplicated with highest confidence winning, then gated to severity `critical`/`high` above `minimum-confidence` (medium and below are overview-only) and ranked deterministically by severity, confidence, file, line, title, and category. The prompt asks the model to skip style, typing, and docs nits so fewer low-value signals are emitted.
 
 Limitations: batches are reviewed independently, so problems that span files in different batches can be missed. Cost scales with PR size; `max-batches` caps it. If **every** batch fails (bad key, wrong model name), the run fails instead of posting an error comment.
 
@@ -161,7 +163,7 @@ Requirements are roughly: a public repo with `action.yml` in the root, a unique 
 | `LLM_API_KEY is not set` | Secret missing, or the PR is from a fork (secrets aren't available) |
 | `LLM_MODEL is not set` | Add the `LLM_MODEL` repository variable |
 | `HTTP 404` / `model not found` | Wrong model name or `LLM_BASE_URL` |
-| `HTTP 400` mentioning `temperature` | Leave `temperature` blank |
+| `HTTP 400` mentioning `temperature` | The engine retries once without it; set `temperature` to `none` to omit it from the start |
 | `HTTP 429` repeatedly | Lower `workers`, or raise your provider's rate limit |
 | `Review failed for this part` in the comment | That batch errored after retries; the files are named in the message |
 | Context-length errors | Lower `batch-chars` |

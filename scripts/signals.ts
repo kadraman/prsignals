@@ -5,6 +5,19 @@ export type SignalCategory =
   | "security" | "quality" | "maintainability" | "performance"
   | "architecture" | "testing" | "documentation" | "compliance";
 
+export type ConfidenceLevel = "high" | "medium" | "low";
+export type EvidenceStatus = "found" | "partial" | "not_found" | "missing";
+
+/** Base score for each model-reported confidence level. The final confidence is computed in code (confidence.ts). */
+export const LEVEL_BASE: Record<ConfidenceLevel, number> = { high: 0.75, medium: 0.55, low: 0.35 };
+
+export interface ConfidenceBreakdown {
+  level: ConfidenceLevel; base: number;
+  anchor: "added" | "context" | "none"; anchorDelta: number;
+  evidence: EvidenceStatus; evidenceDelta: number;
+  agreement: "all" | "partial" | "single" | "n/a"; agreementDelta: number;
+}
+
 export type SignalSeverity = "critical" | "high" | "medium" | "low" | "info";
 
 export interface Signal {
@@ -21,6 +34,9 @@ export interface Signal {
   suggestion?: string;
   ruleId?: string;
   references?: string[];
+  level?: ConfidenceLevel;
+  evidence?: string;
+  confidenceBreakdown?: ConfidenceBreakdown;
 }
 
 export interface GitHubReviewComment {
@@ -50,11 +66,18 @@ function toInt(value: unknown): number | undefined {
   if (typeof value === "string" && /^\d+$/.test(value.trim())) return Number(value.trim());
   return undefined;
 }
-function toConfidence(value: unknown): number | undefined {
-  let n: unknown = typeof value === "string" ? Number(value.replace(/%\s*$/, "")) : value;
-  if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return undefined;
-  if (n > 1 && n <= 100) n = n / 100;
-  return (n as number) <= 1 ? (n as number) : undefined;
+function numberToLevel(n: number): ConfidenceLevel {
+  const x = n > 1 ? n / 100 : n;
+  return x >= 0.85 ? "high" : x >= 0.6 ? "medium" : "low";
+}
+function toLevel(value: unknown): ConfidenceLevel {
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    if (v === "high" || v === "medium" || v === "low") return v;
+    const n = Number(v.replace(/%\s*$/, ""));
+    return Number.isFinite(n) && n >= 0 ? numberToLevel(n) : "low";
+  }
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? numberToLevel(value) : "low";
 }
 function toText(value: unknown): string | undefined {
   if (typeof value === "string") return value.trim() || undefined;
@@ -71,12 +94,14 @@ export function normalizeSignal(row: Record<string, unknown>, index: number): Si
   const file = toText(row.file), title = toText(row.title), description = toText(row.description), line = toInt(row.line);
   if (!CATEGORIES.has(category) || !SEVERITIES.has(severity) || !file || !title || !description || !line || line < 1) return null;
   const endLine = toInt(row.endLine);
+  const level = toLevel(row.confidence);
+  const evidence = toText(row.evidence)?.slice(0, 1000);
   const suggestion = typeof row.suggestion === "string" && row.suggestion.trim() ? row.suggestion : undefined;
   const references = Array.isArray(row.references) ? row.references.filter((item): item is string => typeof item === "string") : undefined;
   return {
     id: toText(row.id) ?? `S${index + 1}`,
     category: category as Signal["category"], severity: severity as Signal["severity"],
-    confidence: toConfidence(row.confidence) ?? 0.5,
+    level, confidence: LEVEL_BASE[level], evidence,
     file, line, endLine: endLine !== undefined && endLine > line ? endLine : undefined,
     title, description, recommendation: toText(row.recommendation), suggestion,
     ruleId: toText(row.ruleId), references,
@@ -197,7 +222,10 @@ export function reviewOverviewBody(
 ): string {
   const parts = ["## PRSignals review", ""];
   if (!inline.length) {
-    parts.push(`No inline findings met the confidence threshold (≥ ${minimumConfidence}).`, "");
+    parts.push(
+      `No inline findings met the gate (critical/high with confidence ≥ ${minimumConfidence}).`,
+      "",
+    );
   } else {
     const bySeverity = new Map<SignalSeverity, number>();
     for (const signal of inline) {
@@ -207,7 +235,7 @@ export function reviewOverviewBody(
       .filter((severity) => bySeverity.has(severity))
       .map((severity) => `| ${severity} | ${bySeverity.get(severity)} |`);
     parts.push(
-      `${inline.length} inline finding${inline.length === 1 ? "" : "s"} (confidence ≥ ${minimumConfidence}).`,
+      `${inline.length} inline finding${inline.length === 1 ? "" : "s"} (critical/high with confidence ≥ ${minimumConfidence}).`,
       "",
       "| Severity | Count |",
       "|---|---|",
@@ -223,10 +251,50 @@ export function reviewOverviewBody(
       "",
       ...leftovers.map(signalBullet),
       "",
-      "_Below the inline confidence threshold, not anchorable on the diff, or beyond the inline comment cap._",
+      "_Below the inline severity/confidence gate, not anchorable on the diff, or beyond the inline comment cap._",
     );
   }
   return parts.join("\n").trimEnd() + "\n";
+}
+
+/** De-duplicate (highest confidence wins) and rank signals in a fully deterministic order. */
+export function rankSignals(signals: Signal[]): Signal[] {
+  const unique = new Map<string, Signal>();
+  for (const signal of signals) {
+    const fingerprint = signalFingerprint(signal);
+    const existing = unique.get(fingerprint);
+    if (!existing || signal.confidence > existing.confidence) unique.set(fingerprint, signal);
+  }
+  return [...unique.values()].sort((a, b) =>
+    severities.indexOf(a.severity) - severities.indexOf(b.severity)
+    || b.confidence - a.confidence
+    || a.file.localeCompare(b.file)
+    || a.line - b.line
+    || a.title.localeCompare(b.title)
+    || a.category.localeCompare(b.category));
+}
+
+/**
+ * Whether a scored signal is eligible for an inline GitHub review comment.
+ * Calibrated against beatbax: only critical/high above the confidence floor post inline;
+ * medium/low/info stay in the overview "Also noted" section (medium@0.9 still flooded FPs).
+ */
+export function qualifiesForInline(signal: Signal, minimumConfidence: number): boolean {
+  if (signal.confidence < minimumConfidence) return false;
+  return signal.severity === "critical" || signal.severity === "high";
+}
+
+/** Split anchored signals into inline comments, below-threshold leftovers, and cap overflow. */
+export function partitionInline(
+  anchored: Signal[], minimumConfidence: number, maxComments: number,
+): { inline: Signal[]; belowConfidence: Signal[]; capped: Signal[] } {
+  const belowConfidence = anchored.filter((signal) => !qualifiesForInline(signal, minimumConfidence));
+  const ordered = rankSignals(anchored.filter((signal) => qualifiesForInline(signal, minimumConfidence)));
+  return {
+    inline: maxComments > 0 ? ordered.slice(0, maxComments) : ordered,
+    belowConfidence,
+    capped: maxComments > 0 ? ordered.slice(maxComments) : [],
+  };
 }
 
 /** Filter, deduplicate, rank, and build the GitHub create-review payload. */
@@ -237,24 +305,7 @@ export function githubReviewPayload(
   render: (signal: Signal) => string = renderSignal,
   unanchored: Signal[] = [],
 ): GitHubReviewPayload {
-  const belowConfidence: Signal[] = [];
-  const unique = new Map<string, Signal>();
-  for (const signal of anchored) {
-    if (signal.confidence < minimumConfidence) {
-      belowConfidence.push(signal);
-      continue;
-    }
-    const fingerprint = signalFingerprint(signal);
-    if (!unique.has(fingerprint)) unique.set(fingerprint, signal);
-  }
-  const ordered = [...unique.values()].sort((a, b) =>
-    severities.indexOf(a.severity) - severities.indexOf(b.severity)
-    || b.confidence - a.confidence
-    || a.file.localeCompare(b.file)
-    || a.line - b.line
-    || a.title.localeCompare(b.title));
-  const inline = maxComments > 0 ? ordered.slice(0, maxComments) : ordered;
-  const capped = maxComments > 0 ? ordered.slice(maxComments) : [];
+  const { inline, belowConfidence, capped } = partitionInline(anchored, minimumConfidence, maxComments);
   const leftovers = [...unanchored, ...belowConfidence, ...capped];
   return {
     event: "COMMENT",

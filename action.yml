@@ -22,17 +22,25 @@ inputs:
     required: false
     default: ""
   temperature:
-    description: Optional sampling temperature. Leave blank to omit it (some models reject it).
+    description: Sampling temperature (default 0). Set to 'none' to omit the parameter (some models reject it).
     required: false
     default: ""
+  consistency-runs:
+    description: Independent review passes for agreement scoring (1-5). Extra runs use CONSISTENCY_TEMPERATURE.
+    required: false
+    default: "1"
   max-output-tokens:
     description: Max output tokens per call (required by the Anthropic API).
     required: false
     default: "8192"
   batch-chars:
-    description: Maximum diff characters sent per API call.
+    description: Maximum diff characters packed per API call.
     required: false
     default: "100000"
+  piece-chars:
+    description: Max characters per file piece before hunk-splitting (keeps large files from failing as one batch). Default 20000.
+    required: false
+    default: "20000"
   max-batches:
     description: Cost guard. Batches beyond this are listed as not reviewed.
     required: false
@@ -42,7 +50,7 @@ inputs:
     required: false
     default: "3"
   minimum-confidence:
-    description: Minimum signal confidence for inline GitHub comments (0..1).
+    description: Confidence floor for inline comments (0..1). Inline also requires severity critical or high (medium/low/info are overview-only).
     required: false
     default: "0.85"
   max-inline-comments:
@@ -112,8 +120,10 @@ runs:
         LLM_PROVIDER: ${{ inputs.provider }}
         LLM_BASE_URL: ${{ inputs.base-url }}
         LLM_TEMPERATURE: ${{ inputs.temperature }}
+        CONSISTENCY_RUNS: ${{ inputs.consistency-runs }}
         LLM_MAX_OUTPUT_TOKENS: ${{ inputs.max-output-tokens }}
         BATCH_CHARS: ${{ inputs.batch-chars }}
+        PIECE_CHARS: ${{ inputs.piece-chars }}
         MAX_BATCHES: ${{ inputs.max-batches }}
         WORKERS: ${{ inputs.workers }}
         MINIMUM_CONFIDENCE: ${{ inputs.minimum-confidence }}

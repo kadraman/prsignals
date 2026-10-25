@@ -27,3 +27,6 @@ pnpm-debug.log*
 # Local review output
 prsignals-out/
 .prsignals/
+
+# Calibration harness (diffs, model output, labels)
+calibration/

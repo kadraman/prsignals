@@ -57,7 +57,7 @@ test("parseResponse: prose is not ok, empty array is ok, array recommendation su
   assert.deepEqual(parseResponse('{"signals": []}'), { ok: true, signals: [], dropped: 0 });
   const r = parseResponse('```json\n{"signals":[{"id":1,"category":"Security","severity":"HIGH","confidence":"85%","file":"a.py","line":"2","title":"t","description":"d","recommendation":["do A","do B"]},{"bad":true}]}\n```');
   assert.equal(r.ok, true); assert.equal(r.dropped, 1); assert.equal(r.signals.length, 1);
-  assert.equal(r.signals[0].line, 2); assert.equal(r.signals[0].confidence, 0.85);
+  assert.equal(r.signals[0].line, 2); assert.equal(r.signals[0].level, "high"); assert.equal(r.signals[0].confidence, 0.75);
   assert.equal(r.signals[0].recommendation, "do A do B");
   assert.doesNotThrow(() => renderSignal(r.signals[0]));
 });
@@ -93,26 +93,30 @@ test("renderSignal picks a fence longer than any backtick run in the suggestion"
 
 test("review overview body summarizes inline findings and leftovers", () => {
   const empty = reviewOverviewBody([], 0.85);
-  assert.match(empty, /No inline findings met the confidence threshold/);
+  assert.match(empty, /No inline findings met the gate/);
   const body = reviewOverviewBody([
     sig({ severity: "high", title: "CRLF blank context", file: "scripts/difflines.ts", line: 34 }),
-    sig({ severity: "medium", title: "Fence length", file: "scripts/signals.ts", line: 128 }),
+    sig({ severity: "critical", confidence: 0.95, title: "Fence length", file: "scripts/signals.ts", line: 128 }),
   ] as any, 0.85, [sig({ confidence: 0.5, title: "Low confidence note", line: 99 }) as any]);
   assert.match(body, /## PRSignals review/);
-  assert.match(body, /2 inline findings \(confidence ≥ 0\.85\)/);
+  assert.match(body, /2 inline findings \(critical\/high with confidence ≥ 0\.85\)/);
+  assert.match(body, /\| critical \| 1 \|/);
   assert.match(body, /\| high \| 1 \|/);
-  assert.match(body, /\| medium \| 1 \|/);
   assert.match(body, /\*\*CRLF blank context\*\* \(`scripts\/difflines\.ts:34`\)/);
   assert.match(body, /### Also noted \(not inline\)/);
   assert.match(body, /\*\*Low confidence note\*\*/);
   const payload = githubReviewPayload([
     sig({ confidence: 0.9, title: "Keep" }),
     sig({ confidence: 0.5, title: "Drop" }),
+    sig({ severity: "low", confidence: 0.95, title: "Low severity drop" }),
+    sig({ severity: "medium", confidence: 0.99, title: "Medium never inline" }),
   ] as any, 0.85, undefined, undefined, [sig({ file: "other.py", line: 1, title: "Unanchored", confidence: 0.9 }) as any]);
   assert.match(payload.body, /1 inline finding/);
   assert.match(payload.body, /\*\*Keep\*\*/);
   assert.match(payload.body, /### Also noted \(not inline\)/);
   assert.match(payload.body, /\*\*Drop\*\*/);
+  assert.match(payload.body, /\*\*Low severity drop\*\*/);
+  assert.match(payload.body, /\*\*Medium never inline\*\*/);
   assert.match(payload.body, /\*\*Unanchored\*\*/);
   assert.equal(payload.comments.length, 1);
 });
