@@ -12,9 +12,11 @@ AI-powered pull request review for GitHub that works with **any model** (OpenAI,
 
 ```
 action.yml                 composite GitHub Action
-scripts/reviewbrief.ts     review engine (also runs standalone)
-scripts/findings.ts        canonical Finding types and GitHub renderer
+src/reviewbrief.ts         review engine (also runs standalone)
+src/findings.ts            canonical Finding types and GitHub renderer
 scripts/review-pr.sh       run it against an existing PR from your machine
+scripts/calibrate.ts       confidence calibration harness
+test/                      unit and end-to-end tests
 examples/reviewbrief.yml   workflow that uses the action
 .env.example               config template for local runs
 ```
@@ -55,16 +57,23 @@ Notes:
 You can also call the engine directly on any diff:
 
 ```bash
-git diff main...HEAD | node --experimental-strip-types scripts/reviewbrief.ts --out-dir out
-node --experimental-strip-types scripts/reviewbrief.ts --diff my.diff --dry-run
+git diff main...HEAD | node --experimental-strip-types src/reviewbrief.ts --out-dir out
+node --experimental-strip-types src/reviewbrief.ts --diff my.diff --dry-run
 ```
 
 ---
 
 ## 2. Run it on every PR (GitHub Actions)
 
-1. Put this folder in a public (or private) repo, e.g. `kadraman/reviewbrief`, and tag a release (`v1`).
-2. In the repo you want reviewed, add **Settings → Secrets and variables → Actions**:
+Call the action that already lives in [kadraman/reviewbrief](https://github.com/kadraman/reviewbrief). Once it is listed on the GitHub Marketplace, install it from that listing. Either way the workflow line is:
+
+```yaml
+uses: kadraman/reviewbrief@v1
+```
+
+Pin `@v1`, or a commit SHA, so a moving branch cannot change the review.
+
+1. In the repo you want reviewed, add **Settings → Secrets and variables → Actions**:
 
    | Name | Type | Notes |
    |---|---|---|
@@ -73,11 +82,9 @@ node --experimental-strip-types scripts/reviewbrief.ts --diff my.diff --dry-run
    | `LLM_PROVIDER` | Variable | `openai` (default) or `anthropic` |
    | `LLM_BASE_URL` | Variable | optional API root override |
 
-3. Copy `examples/reviewbrief.yml` to `.github/workflows/reviewbrief.yml` and replace `kadraman/reviewbrief@v1` with your action reference.
+2. Copy [`examples/reviewbrief.yml`](examples/reviewbrief.yml) to `.github/workflows/reviewbrief.yml` in that repo. It already uses `kadraman/reviewbrief@v1`.
 
 Use `actions/checkout` with `fetch-depth: 0` (the example does) so very large diffs aren't limited by GitHub's API.
-
-To test the action inside this repo before publishing, use `uses: ./` in a workflow here.
 
 ### Provider examples
 
@@ -112,13 +119,29 @@ Model names change often. Check your provider's docs for the current ones.
 | `post-comment` | `true` | post the review as a PR comment |
 | `github-token` | `github.token` | needs `pull-requests: write` |
 
-Outputs: `review-path`, `fix-brief-path`, `fix-brief-url`.
+Outputs: `review-path`, `fix-brief-path`, `fix-brief-url`, `findings-path`, `findings-url`.
 
 ---
 
-## Using the fix brief
+## Using the results
 
-The PR comment links to the `fix-brief.md` artifact (kept 14 days). Download it, check out the PR branch, and give it to your assistant. For example, with Claude Code:
+The action uploads two artifacts and keeps each for 14 days. The pull request comment links to whichever of them exist.
+
+| Artifact | File | Contents |
+|---|---|---|
+| `fix-brief-pr-<number>` | `fix-brief.md` | Prompt for an assistant. Uploaded when something actionable was found. |
+| `findings-pr-<number>` | `findings.json` | Every scored finding: file, line range, severity, evidence quote, suggestion, and confidence breakdown. |
+
+`fix-brief.md` is what you hand to an assistant that should re-read the code and decide what to change. `findings.json` is what an agent needs to apply a suggestion or to skip a finding whose evidence did not check out. The workflow token needs `actions: write` so these uploads succeed; `examples/reviewbrief.yml` sets that.
+
+Download them on a machine where `gh` is authenticated against the repo. `RUN_ID` is the Actions run that reviewed the pull request. A later push starts a new run and a new pair of artifacts with the same names, so download that run.
+
+```bash
+gh run download RUN_ID --repo OWNER/NAME --name fix-brief-pr-123
+gh run download RUN_ID --repo OWNER/NAME --name findings-pr-123
+```
+
+Check out the pull request branch and give the brief to your assistant. For example, with Claude Code:
 
 ```bash
 claude -p "$(cat fix-brief.md)"
@@ -150,12 +173,6 @@ Limitations: batches are reviewed independently, so problems that span files in 
 
 ---
 
-## Publishing to the GitHub Marketplace
-
-Requirements are roughly: a public repo with `action.yml` in the root, a unique action name, two-factor auth on your account, and acceptance of the Marketplace Developer Agreement. Before choosing a name, search the Marketplace, check that no GitHub user/org has it, and search the web for existing products. Then edit `author:` in `action.yml`, add a LICENSE, create a release, and tick "Publish this Action to the GitHub Marketplace".
-
----
-
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -168,3 +185,5 @@ Requirements are roughly: a public repo with `action.yml` in the root, a unique 
 | `Review failed for this part` in the comment | That batch errored after retries; the files are named in the message |
 | Context-length errors | Lower `batch-chars` |
 | `git diff failed` in the action log | Shallow checkout; use `fetch-depth: 0` |
+
+Releasing and Marketplace publishing are in [DEVELOPMENT.md](DEVELOPMENT.md).

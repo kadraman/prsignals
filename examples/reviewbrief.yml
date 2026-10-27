@@ -1,4 +1,8 @@
 # Copy this to .github/workflows/reviewbrief.yml in the repo you want reviewed.
+# It calls the action in kadraman/reviewbrief. After the Marketplace listing
+# exists, installing from there uses this same reference.
+# The action publishes fix-brief-pr-<number> and findings-pr-<number> (kept 14 days).
+# actions: write is required for those artifact uploads.
 #
 # Settings > Secrets and variables > Actions:
 #   Secret    LLM_API_KEY    your provider's API key
@@ -14,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
   pull-requests: write
 
 jobs:
@@ -27,7 +32,7 @@ jobs:
         with:
           fetch-depth: 0   # full history, so large diffs aren't limited by GitHub's API
 
-      - uses: kadraman/reviewbrief@v1   # or "./" when testing inside this repo
+      - uses: kadraman/reviewbrief@v1
         with:
           api-key: ${{ secrets.LLM_API_KEY }}
           model: ${{ vars.LLM_MODEL }}

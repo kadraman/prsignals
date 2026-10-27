@@ -7,8 +7,16 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
-const ROOT = dirname(fileURLToPath(import.meta.url));
-const SCRIPT = join(ROOT, "reviewbrief.ts");
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "../src/reviewbrief.ts");
+
+const THREE_FILE_DIFF = [
+  "diff --git a/one.py b/one.py", "index 111..222 100644", "--- a/one.py", "+++ b/one.py",
+  "@@ -1,1 +1,2 @@", " keep", "+added-one",
+  "diff --git a/two.py b/two.py", "index 111..222 100644", "--- a/two.py", "+++ b/two.py",
+  "@@ -1,1 +1,2 @@", " keep", "+added-two",
+  "diff --git a/three.py b/three.py", "index 111..222 100644", "--- a/three.py", "+++ b/three.py",
+  "@@ -1,1 +1,2 @@", " keep", "+added-three",
+].join("\n");
 
 // a.py new-file lines: 1 context "import os", 2 "def run(cmd):", 3 "    os.system(cmd)", 4 "    return True", 5 context "# end"
 const DIFF = [
@@ -25,6 +33,12 @@ const findingsJson = (...findings: unknown[]) => JSON.stringify({ findings });
 
 type Reply = { status: number; content?: string; message?: string };
 type RequestBody = { temperature?: number; messages?: { role: string; content: string }[] };
+
+function partNumber(body: RequestBody): number {
+  const user = body.messages?.find((m) => m.role === "user")?.content ?? "";
+  const match = /This is part (\d+) of/.exec(user);
+  return match ? Number(match[1]) : 0;
+}
 
 async function withMock(handler: (call: number, body: RequestBody) => Reply, run: (baseUrl: string, seen: RequestBody[]) => Promise<void>): Promise<void> {
   const seen: RequestBody[] = [];
@@ -67,7 +81,7 @@ function runReview(baseUrl: string, outDir: string, diffPath: string, extraEnv: 
 
 async function scenario(diff: string, handler: Parameters<typeof withMock>[0], extraEnv: Record<string, string>,
   check: (r: { code: number; stdout: string; stderr: string }, out: string, seen: RequestBody[]) => void | Promise<void>): Promise<void> {
-  const dir = mkdtempSync(join(tmpdir(), "reviewbrief-p2-"));
+  const dir = mkdtempSync(join(tmpdir(), "reviewbrief-e2e-"));
   const diffPath = join(dir, "pr.diff");
   writeFileSync(diffPath, diff);
   try {
@@ -79,7 +93,34 @@ async function scenario(diff: string, handler: Parameters<typeof withMock>[0], e
 }
 const readFindings = (dir: string) => JSON.parse(readFileSync(join(dir, "findings.json"), "utf8"));
 
-test("e2e: invented evidence is penalised, verified evidence is rewarded, and output is reproducible", async () => {
+test("partial batch failures stay visible and exit 0", async () => {
+  await scenario(THREE_FILE_DIFF, (_call, body) => {
+    const part = partNumber(body);
+    if (part === 3) return { status: 400, message: "bad request" };
+    if (part === 2) return { status: 200, content: "Looks fine overall." };
+    return { status: 200, content: '{"findings": []}' };
+  }, { BATCH_CHARS: "1", MAX_BATCHES: "40" }, (r, out) => {
+    const review = readFileSync(join(out, "review.md"), "utf8");
+    assert.equal(r.code, 0, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+    assert.match(review, /Not reviewed \(2 of 3 parts failed\):/);
+    assert.match(review, /two\.py/);
+    assert.match(review, /three\.py/);
+    assert.match(review, /No actionable findings found in the parts that were reviewed\./);
+    assert.match(`${r.stdout}\n${r.stderr}`, /::warning::2 of 3 review parts failed/);
+  });
+});
+
+test("every batch invalid exits 1 without false empty finding", async () => {
+  await scenario(THREE_FILE_DIFF, () => ({ status: 200, content: "Looks fine overall." }),
+    { BATCH_CHARS: "1", MAX_BATCHES: "40" }, (r, out) => {
+      const review = readFileSync(join(out, "review.md"), "utf8");
+      assert.equal(r.code, 1, `stdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
+      assert.doesNotMatch(review, /No actionable findings found\./);
+      assert.match(review, /model did not return valid JSON/);
+    });
+});
+
+test("invented evidence is penalised, verified evidence is rewarded, and output is reproducible", async () => {
   const reply = (): Reply => ({ status: 200, content: findingsJson(
     finding({ title: "real" }),
     finding({ id: "S2", line: 2, title: "invented", evidence: "eval(user_input)" })) });
@@ -103,7 +144,7 @@ test("e2e: invented evidence is penalised, verified evidence is rewarded, and ou
   }
 });
 
-test("e2e: two consistency runs reward agreement, penalise one-run findings, and vary only the temperature", async () => {
+test("two consistency runs reward agreement, penalise one-run findings, and vary only the temperature", async () => {
   const a = finding({ title: "A", confidence: "medium" });
   const b = finding({ id: "S2", title: "B", category: "quality", line: 4, confidence: "medium", evidence: "return True" });
   await scenario(DIFF, (call) => ({ status: 200, content: call === 1 ? findingsJson(a, b) : findingsJson(a) }),
@@ -118,7 +159,7 @@ test("e2e: two consistency runs reward agreement, penalise one-run findings, and
     });
 });
 
-test("e2e: a model that rejects 'temperature' is retried once without it", async () => {
+test("a model that rejects 'temperature' is retried once without it", async () => {
   await scenario(DIFF, (_call, body) => body.temperature !== undefined
     ? { status: 400, message: "temperature is not supported for this model" }
     : { status: 200, content: findingsJson(finding()) }, {}, (r, out, seen) => {
@@ -131,14 +172,14 @@ test("e2e: a model that rejects 'temperature' is retried once without it", async
   });
 });
 
-test("e2e: LLM_TEMPERATURE=none omits the parameter entirely", async () => {
+test("LLM_TEMPERATURE=none omits the parameter entirely", async () => {
   await scenario(DIFF, () => ({ status: 200, content: findingsJson(finding()) }), { LLM_TEMPERATURE: "none" }, (r, _out, seen) => {
     assert.equal(r.code, 0, r.stderr);
     assert.equal(seen[0].temperature, undefined);
   });
 });
 
-test("e2e: a failed extra run disables agreement scoring visibly", async () => {
+test("a failed extra run disables agreement scoring visibly", async () => {
   await scenario(DIFF, (call) => call === 1
     ? { status: 200, content: findingsJson(finding({ confidence: "medium" })) }
     : { status: 400, message: "bad request" }, { CONSISTENCY_RUNS: "2" }, (r, out) => {
@@ -152,7 +193,7 @@ test("e2e: a failed extra run disables agreement scoring visibly", async () => {
   });
 });
 
-test("e2e: a diff with only skipped files still writes an empty findings.json", async () => {
+test("a diff with only skipped files still writes an empty findings.json", async () => {
   await scenario(LOCKFILE_DIFF, () => ({ status: 500 }), {}, (r, out) => {
     assert.equal(r.code, 0, r.stderr);
     assert.deepEqual(readFindings(out).findings, []);

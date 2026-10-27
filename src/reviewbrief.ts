@@ -14,7 +14,7 @@ const DEFAULT_BASE: Record<string, string> = {
 };
 const RETRY_CODES = new Set([429, 500, 502, 503, 504, 529]);
 const SKIP_PATTERN = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock|go\.sum|Gemfile\.lock|composer\.lock)$|\.min\.(js|css)$|\.(png|jpe?g|gif|svg|ico|pdf|woff2?|map)$/i;
-const REVIEW_SYSTEM = `You are a senior engineer reviewing part of a pull request diff. Return ONLY a JSON object with a top-level 'findings' array. Each item must have: id, category (security|quality|maintainability|performance|architecture|testing|documentation|compliance), severity (critical|high|medium|low|info), confidence ("high"|"medium"|"low"), file, line, title, description, evidence, and optional endLine, recommendation, suggestion, ruleId, references.
+export const REVIEW_SYSTEM = `You are a senior engineer reviewing part of a pull request diff. Return ONLY a JSON object with a top-level 'findings' array. Each item must have: id, category (security|quality|maintainability|performance|architecture|testing|documentation|compliance), severity (critical|high|medium|low|info), confidence ("high"|"medium"|"low"), file, line, title, description, evidence, and optional endLine, recommendation, suggestion, ruleId, references.
 
 Confidence rubric (choose exactly one):
 - "high": you can quote the exact changed line(s) that cause the problem and explain precisely how it fails (for example an unchecked null dereference, user input concatenated into a SQL string, a resource opened and never closed).
@@ -329,7 +329,7 @@ function readArgs(argv: string[]) {
     if (arg === "--dry-run" || arg === "--no-fix-brief") { flags.add(arg); continue; }
     if (arg === "--version") { console.log(VERSION); process.exit(0); }
     if (arg === "--help" || arg === "-h") {
-      console.log("Usage: node scripts/reviewbrief.ts [--diff FILE] [--out-dir DIR] [--dry-run] [--no-fix-brief]\nConfiguration is read from environment variables.");
+      console.log("Usage: node src/reviewbrief.ts [--diff FILE] [--out-dir DIR] [--dry-run] [--no-fix-brief]\nConfiguration is read from environment variables.");
       process.exit(0);
     }
     const name = names[arg];

@@ -1,4 +1,6 @@
 # Self-review: runs this repo's composite action against its own PRs.
+# The action publishes fix-brief-pr-<number> and findings-pr-<number> (kept 14 days).
+# actions: write is required for those artifact uploads.
 #
 # Expects Settings > Secrets and variables > Actions:
 #   Secret    LLM_API_KEY
@@ -16,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
   pull-requests: write
 
 jobs:

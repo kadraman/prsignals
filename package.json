@@ -6,7 +6,7 @@
     "node": ">=22.6.0"
   },
   "scripts": {
-    "review": "node --experimental-strip-types scripts/reviewbrief.ts",
-    "test": "node --experimental-strip-types --test scripts/*.test.ts"
+    "review": "node --experimental-strip-types src/reviewbrief.ts",
+    "test": "node --experimental-strip-types --test test/*.test.ts"
   }
 }

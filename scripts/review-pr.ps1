@@ -197,7 +197,7 @@ $diffBytes = (Get-Item -LiteralPath $diffPath).Length
 Write-Host "  diff: $diffBytes bytes"
 
 $nodeArgs = @(
-  "--experimental-strip-types", (Join-Path $Here "reviewbrief.ts"),
+  "--experimental-strip-types", (Join-Path $Root "src/reviewbrief.ts"),
   "--diff", $diffPath, "--out-dir", $Out,
   "--title", $Title, "--body", $Body, "--pr", $PR, "--repo", $Repo, "--head", $Head, "--base", $Base
 )

@@ -11,7 +11,7 @@
  *   node scripts/calibrate.ts report  --repo OWNER/NAME [--target-precision 0.8] [--min-samples 5] [--rescore]
  *
  * `report --rescore` recomputes every confidence from the stored breakdown using the SCORING constants in
- * confidence.ts, so you can tune those constants against the same labeled findings without new model calls.
+ * src/confidence.ts, so you can tune those constants against the same labeled findings without new model calls.
  *
  * Requires Node.js 22+, an authenticated GitHub CLI (`gh auth login`), and the LLM_* environment variables
  * used by the engine (LLM_API_KEY, LLM_MODEL, ...). A `.env` in the current directory or the repo root is
@@ -23,7 +23,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { SCORING } from "./confidence.ts";
+import { SCORING } from "../src/confidence.ts";
 
 /** Load KEY=VALUE lines from a .env file without overriding variables already set in the environment. */
 function loadDotEnv(path: string): void {
@@ -200,7 +200,7 @@ function collect(opts: Options): void {
   const out = outDir(opts, repo);
   const runs = Math.max(1, numOpt(opts, "runs", 1));
   const maxDiffChars = numOpt(opts, "max-diff-chars", 400000);
-  const engine = String(opts.engine ?? join(HERE, "reviewbrief.ts"));
+  const engine = String(opts.engine ?? join(HERE, "..", "src", "reviewbrief.ts"));
   const prs = listPrs(repo, opts);
 
   console.log(`Selected ${prs.length} closed PR(s) from ${repo}; ${prs.length * runs} engine run(s) planned.\n`);

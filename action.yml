@@ -80,6 +80,12 @@ outputs:
   fix-brief-url:
     description: Download URL of the uploaded fix-brief artifact.
     value: ${{ steps.upload.outputs.artifact-url }}
+  findings-path:
+    description: Path to findings.json (every scored finding). Empty if the file was not written.
+    value: ${{ steps.review.outputs.findings_path }}
+  findings-url:
+    description: Download URL of the uploaded findings.json artifact.
+    value: ${{ steps.upload-findings.outputs.artifact-url }}
 
 runs:
   using: composite
@@ -138,11 +144,14 @@ runs:
       run: |
         set -euo pipefail
         out="$RUNNER_TEMP/reviewbrief"
-        node --experimental-strip-types "$ACTION_PATH/scripts/reviewbrief.ts" --diff "$out/pr.diff" --out-dir "$out"
+        node --experimental-strip-types "$ACTION_PATH/src/reviewbrief.ts" --diff "$out/pr.diff" --out-dir "$out"
         echo "review_path=$out/review.md" >> "$GITHUB_OUTPUT"
         if [ -f "$out/fix-brief.md" ]; then
           echo "has_brief=true" >> "$GITHUB_OUTPUT"
           echo "brief_path=$out/fix-brief.md" >> "$GITHUB_OUTPUT"
+        fi
+        if [ -f "$out/findings.json" ]; then
+          echo "findings_path=$out/findings.json" >> "$GITHUB_OUTPUT"
         fi
         echo "review_payload_path=$out/review-payload.json" >> "$GITHUB_OUTPUT"
 
@@ -155,6 +164,15 @@ runs:
         path: ${{ steps.review.outputs.brief_path }}
         retention-days: 14
 
+    - name: Upload findings
+      id: upload-findings
+      if: steps.review.outputs.findings_path != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: findings-pr-${{ github.event.pull_request.number }}
+        path: ${{ steps.review.outputs.findings_path }}
+        retention-days: 14
+
     - name: Post review comment
       if: inputs.post-comment == 'true' && github.event.pull_request
       shell: bash
@@ -164,24 +182,32 @@ runs:
         REVIEW: ${{ steps.review.outputs.review_path }}
         REVIEW_PAYLOAD: ${{ steps.review.outputs.review_payload_path }}
         BRIEF_URL: ${{ steps.upload.outputs.artifact-url }}
+        FINDINGS_URL: ${{ steps.upload-findings.outputs.artifact-url }}
         REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
-        append_brief_to_review() {
-          if [ -n "${BRIEF_URL:-}" ]; then
-            printf '\n\n**Fix brief for an AI assistant:** [download fix-brief.md](%s)\n' "$BRIEF_URL" >> "$REVIEW"
-          fi
+        append_downloads_to_review() {
+          node --input-type=module -e '
+            import { appendFileSync } from "node:fs";
+            const [path, brief, findings] = process.argv.slice(1);
+            const lines = [];
+            if (brief) lines.push(`**Fix brief for an AI assistant:** [download fix-brief.md](${brief})`);
+            if (findings) lines.push(`**Scored findings:** [download findings.json](${findings})`);
+            if (lines.length) appendFileSync(path, `\n${lines.join("\n\n")}\n`);
+          ' "$REVIEW" "${BRIEF_URL:-}" "${FINDINGS_URL:-}"
         }
-        append_brief_to_payload() {
-          if [ -n "${BRIEF_URL:-}" ]; then
-            node --input-type=module -e '
-              import { readFileSync, writeFileSync } from "node:fs";
-              const path = process.argv[1], url = process.argv[2];
-              const payload = JSON.parse(readFileSync(path, "utf8"));
-              payload.body = `${payload.body.trimEnd()}\n\n**Fix brief for an AI assistant:** [download fix-brief.md](${url})\n`;
-              writeFileSync(path, JSON.stringify(payload, null, 2));
-            ' "$REVIEW_PAYLOAD" "$BRIEF_URL"
-          fi
+        append_downloads_to_payload() {
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            const [path, brief, findings] = process.argv.slice(1);
+            const lines = [];
+            if (brief) lines.push(`**Fix brief for an AI assistant:** [download fix-brief.md](${brief})`);
+            if (findings) lines.push(`**Scored findings:** [download findings.json](${findings})`);
+            if (!lines.length) process.exit(0);
+            const payload = JSON.parse(readFileSync(path, "utf8"));
+            payload.body = `${payload.body.trimEnd()}\n\n${lines.join("\n\n")}\n`;
+            writeFileSync(path, JSON.stringify(payload, null, 2));
+          ' "$REVIEW_PAYLOAD" "${BRIEF_URL:-}" "${FINDINGS_URL:-}"
         }
         INLINE_COUNT=0
         if [ -s "$REVIEW_PAYLOAD" ]; then
@@ -190,16 +216,16 @@ runs:
         # Prefer a single PR review (overview + inline threads). Fall back to a summary
         # issue comment when there are no inline findings, or if create-review fails.
         if [ "$INLINE_COUNT" -gt 0 ]; then
-          append_brief_to_payload
+          append_downloads_to_payload
           if gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input "$REVIEW_PAYLOAD"; then
             echo "Posted PR review with $INLINE_COUNT inline comment(s)."
           else
             echo "::warning::Inline review failed; posting summary comment only."
-            append_brief_to_review
+            append_downloads_to_review
             gh pr comment "$PR_NUMBER" --body-file "$REVIEW"
           fi
         else
-          append_brief_to_review
+          append_downloads_to_review
           gh pr comment "$PR_NUMBER" --body-file "$REVIEW"
           echo "No inline findings; posted summary comment only."
         fi

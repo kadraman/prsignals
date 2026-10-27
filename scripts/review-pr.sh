@@ -125,7 +125,7 @@ ARGS=(--diff "$OUT/pr.diff" --out-dir "$OUT"
 
 echo
 rc=0
-node --experimental-strip-types "$HERE/reviewbrief.ts" "${ARGS[@]}" || rc=$?
+node --experimental-strip-types "$ROOT/src/reviewbrief.ts" "${ARGS[@]}" || rc=$?
 [ "$rc" -eq 0 ] || die "review failed (exit $rc); see output above"
 
 if [ "$DRY" -eq 1 ]; then
