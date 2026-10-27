@@ -25,6 +25,8 @@ pnpm-debug.log*
 .vscode/
 
 # Local review output
+reviewbrief-out/
+.reviewbrief/
 prsignals-out/
 .prsignals/
 

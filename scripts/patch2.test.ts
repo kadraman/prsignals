@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseDiffLines, resolvePath } from "./difflines.ts";
-import { clusterRuns, scoreSignal, verifyEvidence } from "./confidence.ts";
-import { parseResponse, partitionInline, qualifiesForInline, rankSignals } from "./signals.ts";
-import { packBatches, splitBatchForRetry, splitDiff } from "./prsignals.ts";
+import { clusterRuns, scoreFinding, verifyEvidence } from "./confidence.ts";
+import { parseResponse, partitionInline, qualifiesForInline, rankFindings } from "./findings.ts";
+import { packBatches, splitBatchForRetry, splitDiff } from "./reviewbrief.ts";
 
 const DIFF = [
   "diff --git a/a.py b/a.py", "--- a/a.py", "+++ b/a.py",
@@ -13,11 +13,11 @@ const map = parseDiffLines(DIFF);       // a.py: 1 ctx "import os", 2 "def run(c
 const sig = (o: any = {}) => ({ id: "S", category: "security", severity: "high", level: "high", confidence: 0.75, file: "a.py", line: 3,
   title: "t", description: "d", evidence: "os.system(cmd)", ...o });
 
-test("normalizeSignal maps confidence levels and numbers; missing is low", () => {
-  const level = (c: unknown) => parseResponse(JSON.stringify({ signals: [{ category: "quality", severity: "low", file: "a", line: 1, title: "t", description: "d", confidence: c }] })).signals[0];
+test("normalizeFinding maps confidence levels and numbers; missing is low", () => {
+  const level = (c: unknown) => parseResponse(JSON.stringify({ findings: [{ category: "quality", severity: "low", file: "a", line: 1, title: "t", description: "d", confidence: c }] })).findings[0];
   assert.deepEqual(["high", "MEDIUM", 0.9, "70%", 0.2, undefined].map((c) => level(c).level), ["high", "medium", "high", "medium", "low", "low"]);
   assert.equal(level("high").confidence, 0.75);
-  assert.equal(parseResponse(JSON.stringify({ signals: [{ category: "quality", severity: "low", file: "a", line: 1, title: "t", description: "d", confidence: "high", evidence: "x = 1" }] })).signals[0].evidence, "x = 1");
+  assert.equal(parseResponse(JSON.stringify({ findings: [{ category: "quality", severity: "low", file: "a", line: 1, title: "t", description: "d", confidence: "high", evidence: "x = 1" }] })).findings[0].evidence, "x = 1");
 });
 
 test("parseDiffLines keeps line text without carriage returns; resolvePath tolerates prefixes", () => {
@@ -41,8 +41,8 @@ test("verifyEvidence: found, annotation prefix, partial, not found, missing, out
   assert.equal(verifyEvidence(sig({ evidence: "+    os.system(cmd)" }) as any, lines), "found");
 });
 
-test("scoreSignal is deterministic and follows the table", () => {
-  const score = (o: any, a?: any) => scoreSignal(sig(o) as any, map, a).confidence;
+test("scoreFinding is deterministic and follows the table", () => {
+  const score = (o: any, a?: any) => scoreFinding(sig(o) as any, map, a).confidence;
   assert.equal(score({}), 0.95);                                   // high + added + evidence found
   assert.equal(score({ line: 5, evidence: "# end" }), 0.90);        // high + context + found
   assert.equal(score({ evidence: undefined }), 0.75);              // high + added + missing
@@ -53,20 +53,20 @@ test("scoreSignal is deterministic and follows the table", () => {
   assert.equal(score({ level: "medium", line: 5, evidence: "# end" }, { found: 2, runs: 2 }), 0.80); // context line
   assert.equal(score({}, { found: 3, runs: 3 }), 1);               // clamped
   assert.equal(score({}, { found: 1, runs: 2 }), 0.85);
-  assert.deepEqual(scoreSignal(sig() as any, map), scoreSignal(sig() as any, map));
-  assert.equal(scoreSignal(sig() as any, map).confidenceBreakdown!.agreement, "n/a");
+  assert.deepEqual(scoreFinding(sig() as any, map), scoreFinding(sig() as any, map));
+  assert.equal(scoreFinding(sig() as any, map).confidenceBreakdown!.agreement, "n/a");
 });
 
 test("clusterRuns counts each run once and keeps distinct findings apart", () => {
   const a = sig({ line: 10 }), b = sig({ line: 12 }), other = sig({ category: "quality", line: 10 }), far = sig({ line: 50 });
   const r = clusterRuns([[a, far], [b, other]] as any);
-  assert.deepEqual(r.map((c) => [c.signal.line, c.found]), [[10, 2], [50, 1], [10, 1]]);
+  assert.deepEqual(r.map((c) => [c.finding.line, c.found]), [[10, 2], [50, 1], [10, 1]]);
   const twoInOneRun = clusterRuns([[sig({ line: 10 }), sig({ line: 11 })]] as any);
   assert.equal(twoInOneRun.length, 2);                                  // same run: not merged
   assert.deepEqual(clusterRuns([[a], [b]] as any), clusterRuns([[a], [b]] as any));
 });
 
-test("rankSignals/partitionInline: highest-confidence duplicate wins, threshold, cap, input order does not matter", () => {
+test("rankFindings/partitionInline: highest-confidence duplicate wins, threshold, cap, input order does not matter", () => {
   const mk = (o: any) => ({ id: "S", category: "security", severity: "high", confidence: 0.9, file: "a.py", line: 3, title: "t", description: "d", ...o });
   const input = [mk({ confidence: 0.86 }), mk({ confidence: 0.95 }), mk({ line: 5, title: "u", severity: "critical" }), mk({ line: 7, title: "v", confidence: 0.5 }), mk({ line: 9, title: "w", confidence: 0.85 })] as any;
   const part = partitionInline(input, 0.85, 0);
@@ -77,10 +77,10 @@ test("rankSignals/partitionInline: highest-confidence duplicate wins, threshold,
   assert.equal(capped.inline.length, 2);
   assert.deepEqual(capped.capped.map((s) => s.line), [9]);
   assert.deepEqual(partitionInline([...input].reverse(), 0.85, 0), part);
-  assert.deepEqual(rankSignals([...input].reverse()), rankSignals(input));
+  assert.deepEqual(rankFindings([...input].reverse()), rankFindings(input));
   // equal on every ranking key except category: still a total order
   const a = mk({ category: "quality" }), b = mk({ category: "security" });
-  assert.deepEqual(rankSignals([b, a] as any).map((s) => s.category), ["quality", "security"]);
+  assert.deepEqual(rankFindings([b, a] as any).map((s) => s.category), ["quality", "security"]);
 });
 
 test("qualifiesForInline: only critical/high above confidence floor; medium/low/info never inline", () => {

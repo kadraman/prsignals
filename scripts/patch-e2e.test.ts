@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
-const SCRIPT = join(ROOT, "prsignals.ts");
+const SCRIPT = join(ROOT, "reviewbrief.ts");
 
 const THREE_FILE_DIFF = [
   "diff --git a/one.py b/one.py", "index 111..222 100644", "--- a/one.py", "+++ b/one.py",
@@ -58,7 +58,7 @@ async function withMockServer(mode: Mode, run: (baseUrl: string) => Promise<void
         return;
       }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(openaiJson('{"signals": []}'));
+      res.end(openaiJson('{"findings": []}'));
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -98,7 +98,7 @@ function runReview(baseUrl: string, outDir: string, diffPath: string): Promise<{
 }
 
 test("e2e: partial batch failures stay visible and exit 0", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "prsignals-e2e-"));
+  const dir = mkdtempSync(join(tmpdir(), "reviewbrief-e2e-"));
   const diffPath = join(dir, "pr.diff");
   writeFileSync(diffPath, THREE_FILE_DIFF);
   try {
@@ -109,7 +109,7 @@ test("e2e: partial batch failures stay visible and exit 0", async () => {
       assert.match(review, /Not reviewed \(2 of 3 parts failed\):/);
       assert.match(review, /two\.py/);
       assert.match(review, /three\.py/);
-      assert.match(review, /No actionable signals found in the parts that were reviewed\./);
+      assert.match(review, /No actionable findings found in the parts that were reviewed\./);
       assert.match(`${stdout}\n${stderr}`, /::warning::2 of 3 review parts failed/);
     });
   } finally {
@@ -118,7 +118,7 @@ test("e2e: partial batch failures stay visible and exit 0", async () => {
 });
 
 test("e2e: every batch invalid exits 1 without false empty finding", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "prsignals-e2e-"));
+  const dir = mkdtempSync(join(tmpdir(), "reviewbrief-e2e-"));
   const diffPath = join(dir, "pr.diff");
   writeFileSync(diffPath, THREE_FILE_DIFF);
   try {
@@ -126,7 +126,7 @@ test("e2e: every batch invalid exits 1 without false empty finding", async () =>
       const { code, stdout, stderr } = await runReview(baseUrl, dir, diffPath);
       const review = readFileSync(join(dir, "review.md"), "utf8");
       assert.equal(code, 1, `stdout:\n${stdout}\nstderr:\n${stderr}`);
-      assert.doesNotMatch(review, /No actionable signals found\./);
+      assert.doesNotMatch(review, /No actionable findings found\./);
       assert.match(review, /model did not return valid JSON/);
     });
   } finally {

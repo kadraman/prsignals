@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run prsignals against an existing pull request from your own machine.
+# Run reviewbrief against an existing pull request from your own machine.
 # Nothing is posted to GitHub unless you pass --post.
 #
 # Usage:
@@ -10,7 +10,7 @@
 #   --repo OWNER/NAME     repository (not needed inside a clone, or with a PR URL)
 #   --dry-run             show how the diff would be split; make no LLM calls
 #   --post                post the review as a comment on the PR
-#   --out DIR             output directory (default: ./prsignals-out/pr-<N>)
+#   --out DIR             output directory (default: ./reviewbrief-out/pr-<N>)
 #   --provider NAME       openai | anthropic   (overrides LLM_PROVIDER)
 #   --model NAME          model name           (overrides LLM_MODEL)
 #   --base-url URL        API root             (overrides LLM_BASE_URL)
@@ -97,7 +97,7 @@ BASE="$(meta_get baseRefName)"
 URL="$(meta_get url)"
 [ -n "$REPO" ] || REPO="$(printf '%s' "$URL" | sed -E 's#https?://[^/]+/([^/]+/[^/]+)/pull/.*#\1#')"
 
-OUT="${OUT:-$PWD/prsignals-out/pr-$PR}"
+OUT="${OUT:-$PWD/reviewbrief-out/pr-$PR}"
 mkdir -p "$OUT"
 
 echo "  $REPO #$PR: $TITLE"
@@ -109,10 +109,10 @@ if ! gh pr diff "$PR" ${GH_REPO[@]+"${GH_REPO[@]}"} > "$OUT/pr.diff" 2> "$OUT/gh
   echo "  gh pr diff failed: $(head -c 200 "$OUT/gh-diff.err")"
   if git rev-parse --git-dir >/dev/null 2>&1; then
     echo "  falling back to a local git diff (needs 'origin' to be this repo) ..."
-    git fetch --quiet origin "pull/$PR/head:refs/prsignals/pr-$PR" \
+    git fetch --quiet origin "pull/$PR/head:refs/reviewbrief/pr-$PR" \
       || die "git fetch of the PR head failed"
     git fetch --quiet origin "$BASE" || die "git fetch of base branch '$BASE' failed"
-    git diff --no-color "origin/$BASE...refs/prsignals/pr-$PR" > "$OUT/pr.diff"
+    git diff --no-color "origin/$BASE...refs/reviewbrief/pr-$PR" > "$OUT/pr.diff"
   else
     die "could not fetch the diff; run this inside a clone of $REPO to enable the git fallback"
   fi
@@ -125,7 +125,7 @@ ARGS=(--diff "$OUT/pr.diff" --out-dir "$OUT"
 
 echo
 rc=0
-node --experimental-strip-types "$HERE/prsignals.ts" "${ARGS[@]}" || rc=$?
+node --experimental-strip-types "$HERE/reviewbrief.ts" "${ARGS[@]}" || rc=$?
 [ "$rc" -eq 0 ] || die "review failed (exit $rc); see output above"
 
 if [ "$DRY" -eq 1 ]; then
@@ -150,7 +150,7 @@ if [ "$POST" -eq 1 ]; then
   if [ "$INLINE_COUNT" -gt 0 ]; then
     echo "Posting PR review with $INLINE_COUNT inline comment(s)..."
     if gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$OUT/review-payload.json" >/dev/null; then
-      echo "Posted PR review with inline Signal comments."
+      echo "Posted PR review with inline finding comments."
     else
       echo "::warning::Inline review failed; posting summary comment only."
       gh pr comment "$PR" ${GH_REPO[@]+"${GH_REPO[@]}"} --body-file "$OUT/review.md" >/dev/null

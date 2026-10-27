@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-/** Canonical Signal model and GitHub review comment renderer. */
+/** Canonical Finding model and GitHub review comment renderer. */
 
-export type SignalCategory =
+export type FindingCategory =
   | "security" | "quality" | "maintainability" | "performance"
   | "architecture" | "testing" | "documentation" | "compliance";
 
@@ -18,12 +18,12 @@ export interface ConfidenceBreakdown {
   agreement: "all" | "partial" | "single" | "n/a"; agreementDelta: number;
 }
 
-export type SignalSeverity = "critical" | "high" | "medium" | "low" | "info";
+export type FindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 
-export interface Signal {
+export interface Finding {
   id: string;
-  category: SignalCategory;
-  severity: SignalSeverity;
+  category: FindingCategory;
+  severity: FindingSeverity;
   confidence: number;
   file: string;
   line: number;
@@ -56,8 +56,8 @@ export interface GitHubReviewPayload {
 
 const CATEGORIES = new Set(["security", "quality", "maintainability", "performance", "architecture", "testing", "documentation", "compliance"]);
 const SEVERITIES = new Set(["critical", "high", "medium", "low", "info"]);
-const severities: SignalSeverity[] = ["critical", "high", "medium", "low", "info"];
-const icons: Record<SignalSeverity, string> = {
+const severities: FindingSeverity[] = ["critical", "high", "medium", "low", "info"];
+const icons: Record<FindingSeverity, string> = {
   critical: "🚨", high: "⚠️", medium: "🔶", low: "💡", info: "ℹ️",
 };
 
@@ -88,7 +88,7 @@ function toText(value: unknown): string | undefined {
   return undefined;
 }
 
-export function normalizeSignal(row: Record<string, unknown>, index: number): Signal | null {
+export function normalizeFinding(row: Record<string, unknown>, index: number): Finding | null {
   const category = typeof row.category === "string" ? row.category.toLowerCase() : "";
   const severity = typeof row.severity === "string" ? row.severity.toLowerCase() : "";
   const file = toText(row.file), title = toText(row.title), description = toText(row.description), line = toInt(row.line);
@@ -99,8 +99,8 @@ export function normalizeSignal(row: Record<string, unknown>, index: number): Si
   const suggestion = typeof row.suggestion === "string" && row.suggestion.trim() ? row.suggestion : undefined;
   const references = Array.isArray(row.references) ? row.references.filter((item): item is string => typeof item === "string") : undefined;
   return {
-    id: toText(row.id) ?? `S${index + 1}`,
-    category: category as Signal["category"], severity: severity as Signal["severity"],
+    id: toText(row.id) ?? `F${index + 1}`,
+    category: category as Finding["category"], severity: severity as Finding["severity"],
     level, confidence: LEVEL_BASE[level], evidence,
     file, line, endLine: endLine !== undefined && endLine > line ? endLine : undefined,
     title, description, recommendation: toText(row.recommendation), suggestion,
@@ -108,43 +108,43 @@ export function normalizeSignal(row: Record<string, unknown>, index: number): Si
   };
 }
 
-export interface ParseResult { ok: boolean; signals: Signal[]; dropped: number }
+export interface ParseResult { ok: boolean; findings: Finding[]; dropped: number }
 
-/** ok=false: the reply was not usable JSON. ok=true with no signals: a valid "nothing found". */
+/** ok=false: the reply was not usable JSON. ok=true with no findings: a valid "nothing found". */
 export function parseResponse(response: string): ParseResult {
   const text = response.trim().replace(/^```(?:json)?\s*|\s*```$/gi, "");
   let data: unknown;
   try { data = JSON.parse(text); } catch {
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return { ok: false, signals: [], dropped: 0 };
-    try { data = JSON.parse(match[0]); } catch { return { ok: false, signals: [], dropped: 0 }; }
+    if (!match) return { ok: false, findings: [], dropped: 0 };
+    try { data = JSON.parse(match[0]); } catch { return { ok: false, findings: [], dropped: 0 }; }
   }
   const rows = Array.isArray(data) ? data
-    : typeof data === "object" && data !== null ? (data as Record<string, unknown>).signals : undefined;
-  if (!Array.isArray(rows)) return { ok: false, signals: [], dropped: 0 };
-  const signals: Signal[] = [];
+    : typeof data === "object" && data !== null ? (data as Record<string, unknown>).findings : undefined;
+  if (!Array.isArray(rows)) return { ok: false, findings: [], dropped: 0 };
+  const findings: Finding[] = [];
   rows.forEach((row, index) => {
-    const signal = typeof row === "object" && row !== null && !Array.isArray(row)
-      ? normalizeSignal(row as Record<string, unknown>, index) : null;
-    if (signal) signals.push(signal);
+    const finding = typeof row === "object" && row !== null && !Array.isArray(row)
+      ? normalizeFinding(row as Record<string, unknown>, index) : null;
+    if (finding) findings.push(finding);
   });
-  return { ok: true, signals, dropped: rows.length - signals.length };
+  return { ok: true, findings, dropped: rows.length - findings.length };
 }
 
-export function parseSignals(response: string): Signal[] { return parseResponse(response).signals; }
+export function parseFindings(response: string): Finding[] { return parseResponse(response).findings; }
 
 /** Render one concise, bounded GitHub review comment. */
-export function renderSignal(signal: Signal, maxLength = 800): string {
-  const header = `${icons[signal.severity]} **${signal.category[0].toUpperCase()}${signal.category.slice(1)} Signal**`;
-  let title = signal.title.trim();
-  let description = signal.description.trim();
-  let recommendation = signal.recommendation?.trim() ?? "";
-  const suggestion = signal.suggestion?.trimEnd() ?? "";
+export function renderFinding(finding: Finding, maxLength = 800): string {
+  const header = `${icons[finding.severity]} **${finding.category[0].toUpperCase()}${finding.category.slice(1)} Finding**`;
+  let title = finding.title.trim();
+  let description = finding.description.trim();
+  let recommendation = finding.recommendation?.trim() ?? "";
+  const suggestion = finding.suggestion?.trimEnd() ?? "";
   let suggestionNote = "";
-  const confidence = `Confidence: ${Math.round(signal.confidence * 100)}%`;
-  const lineRange = Number.isInteger(signal.endLine) && (signal.endLine as number) >= signal.line
-    ? `${signal.line}-${signal.endLine}` : `${signal.line}`;
-  const location = `**Location:** \`${signal.file.replace(/`/g, "\\`")}:${lineRange}\``;
+  const confidence = `Confidence: ${Math.round(finding.confidence * 100)}%`;
+  const lineRange = Number.isInteger(finding.endLine) && (finding.endLine as number) >= finding.line
+    ? `${finding.line}-${finding.endLine}` : `${finding.line}`;
+  const location = `**Location:** \`${finding.file.replace(/`/g, "\\`")}:${lineRange}\``;
   const suggestionFence = fenceFor(suggestion);
 
   const compose = (includeSuggestion: boolean) => {
@@ -193,43 +193,43 @@ function fenceFor(text: string): string {
   return "`".repeat(Math.max(3, longest + 1));
 }
 
-export function toReviewComment(signal: Signal, body: string): GitHubReviewComment {
-  const range = signal.endLine !== undefined && signal.endLine > signal.line;
+export function toReviewComment(finding: Finding, body: string): GitHubReviewComment {
+  const range = finding.endLine !== undefined && finding.endLine > finding.line;
   const comment: GitHubReviewComment = {
-    path: signal.file, line: range ? (signal.endLine as number) : signal.line, side: "RIGHT", body,
+    path: finding.file, line: range ? (finding.endLine as number) : finding.line, side: "RIGHT", body,
   };
-  if (range) { comment.start_line = signal.line; comment.start_side = "RIGHT"; }
+  if (range) { comment.start_line = finding.line; comment.start_side = "RIGHT"; }
   return comment;
 }
 
-function signalFingerprint(signal: Signal): string {
-  return JSON.stringify([signal.file, signal.line, signal.category, signal.title]);
+function findingFingerprint(finding: Finding): string {
+  return JSON.stringify([finding.file, finding.line, finding.category, finding.title]);
 }
 
-function signalBullet(signal: Signal): string {
-  const icon = icons[signal.severity];
-  const range = Number.isInteger(signal.endLine) && (signal.endLine as number) > signal.line
-    ? `${signal.line}-${signal.endLine}` : `${signal.line}`;
-  const title = signal.title.replace(/\s+/g, " ").trim();
-  return `- ${icon} **${title}** (\`${signal.file}:${range}\`)`;
+function findingBullet(finding: Finding): string {
+  const icon = icons[finding.severity];
+  const range = Number.isInteger(finding.endLine) && (finding.endLine as number) > finding.line
+    ? `${finding.line}-${finding.endLine}` : `${finding.line}`;
+  const title = finding.title.replace(/\s+/g, " ").trim();
+  return `- ${icon} **${title}** (\`${finding.file}:${range}\`)`;
 }
 
 /** Build the create-review overview body shown above the inline comment threads. */
 export function reviewOverviewBody(
-  inline: Signal[],
+  inline: Finding[],
   minimumConfidence: number,
-  leftovers: Signal[] = [],
+  leftovers: Finding[] = [],
 ): string {
-  const parts = ["## PRSignals review", ""];
+  const parts = ["## ReviewBrief", ""];
   if (!inline.length) {
     parts.push(
       `No inline findings met the gate (critical/high with confidence ≥ ${minimumConfidence}).`,
       "",
     );
   } else {
-    const bySeverity = new Map<SignalSeverity, number>();
-    for (const signal of inline) {
-      bySeverity.set(signal.severity, (bySeverity.get(signal.severity) ?? 0) + 1);
+    const bySeverity = new Map<FindingSeverity, number>();
+    for (const finding of inline) {
+      bySeverity.set(finding.severity, (bySeverity.get(finding.severity) ?? 0) + 1);
     }
     const counts = severities
       .filter((severity) => bySeverity.has(severity))
@@ -241,7 +241,7 @@ export function reviewOverviewBody(
       "|---|---|",
       ...counts,
       "",
-      ...inline.map(signalBullet),
+      ...inline.map(findingBullet),
       "",
     );
   }
@@ -249,7 +249,7 @@ export function reviewOverviewBody(
     parts.push(
       "### Also noted (not inline)",
       "",
-      ...leftovers.map(signalBullet),
+      ...leftovers.map(findingBullet),
       "",
       "_Below the inline severity/confidence gate, not anchorable on the diff, or beyond the inline comment cap._",
     );
@@ -257,13 +257,13 @@ export function reviewOverviewBody(
   return parts.join("\n").trimEnd() + "\n";
 }
 
-/** De-duplicate (highest confidence wins) and rank signals in a fully deterministic order. */
-export function rankSignals(signals: Signal[]): Signal[] {
-  const unique = new Map<string, Signal>();
-  for (const signal of signals) {
-    const fingerprint = signalFingerprint(signal);
+/** De-duplicate (highest confidence wins) and rank findings in a fully deterministic order. */
+export function rankFindings(findings: Finding[]): Finding[] {
+  const unique = new Map<string, Finding>();
+  for (const finding of findings) {
+    const fingerprint = findingFingerprint(finding);
     const existing = unique.get(fingerprint);
-    if (!existing || signal.confidence > existing.confidence) unique.set(fingerprint, signal);
+    if (!existing || finding.confidence > existing.confidence) unique.set(fingerprint, finding);
   }
   return [...unique.values()].sort((a, b) =>
     severities.indexOf(a.severity) - severities.indexOf(b.severity)
@@ -275,21 +275,21 @@ export function rankSignals(signals: Signal[]): Signal[] {
 }
 
 /**
- * Whether a scored signal is eligible for an inline GitHub review comment.
+ * Whether a scored finding is eligible for an inline GitHub review comment.
  * Calibrated against beatbax: only critical/high above the confidence floor post inline;
  * medium/low/info stay in the overview "Also noted" section (medium@0.9 still flooded FPs).
  */
-export function qualifiesForInline(signal: Signal, minimumConfidence: number): boolean {
-  if (signal.confidence < minimumConfidence) return false;
-  return signal.severity === "critical" || signal.severity === "high";
+export function qualifiesForInline(finding: Finding, minimumConfidence: number): boolean {
+  if (finding.confidence < minimumConfidence) return false;
+  return finding.severity === "critical" || finding.severity === "high";
 }
 
-/** Split anchored signals into inline comments, below-threshold leftovers, and cap overflow. */
+/** Split anchored findings into inline comments, below-threshold leftovers, and cap overflow. */
 export function partitionInline(
-  anchored: Signal[], minimumConfidence: number, maxComments: number,
-): { inline: Signal[]; belowConfidence: Signal[]; capped: Signal[] } {
-  const belowConfidence = anchored.filter((signal) => !qualifiesForInline(signal, minimumConfidence));
-  const ordered = rankSignals(anchored.filter((signal) => qualifiesForInline(signal, minimumConfidence)));
+  anchored: Finding[], minimumConfidence: number, maxComments: number,
+): { inline: Finding[]; belowConfidence: Finding[]; capped: Finding[] } {
+  const belowConfidence = anchored.filter((finding) => !qualifiesForInline(finding, minimumConfidence));
+  const ordered = rankFindings(anchored.filter((finding) => qualifiesForInline(finding, minimumConfidence)));
   return {
     inline: maxComments > 0 ? ordered.slice(0, maxComments) : ordered,
     belowConfidence,
@@ -299,18 +299,18 @@ export function partitionInline(
 
 /** Filter, deduplicate, rank, and build the GitHub create-review payload. */
 export function githubReviewPayload(
-  anchored: Signal[],
+  anchored: Finding[],
   minimumConfidence = 0.85,
   maxComments = Number.POSITIVE_INFINITY,
-  render: (signal: Signal) => string = renderSignal,
-  unanchored: Signal[] = [],
+  render: (finding: Finding) => string = renderFinding,
+  unanchored: Finding[] = [],
 ): GitHubReviewPayload {
   const { inline, belowConfidence, capped } = partitionInline(anchored, minimumConfidence, maxComments);
   const leftovers = [...unanchored, ...belowConfidence, ...capped];
   return {
     event: "COMMENT",
     body: reviewOverviewBody(inline, minimumConfidence, leftovers),
-    comments: inline.map((signal) => toReviewComment(signal, render(signal))),
+    comments: inline.map((finding) => toReviewComment(finding, render(finding))),
   };
 }
 

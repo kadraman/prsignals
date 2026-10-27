@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseDiffLines, annotateDiff, anchorSignals } from "./difflines.ts";
-import { githubReviewPayload, parseResponse, renderSignal, reviewOverviewBody, toReviewComment } from "./signals.ts";
+import { parseDiffLines, annotateDiff, anchorFindings } from "./difflines.ts";
+import { githubReviewPayload, parseResponse, renderFinding, reviewOverviewBody, toReviewComment } from "./findings.ts";
 
 const DIFF = [
   "diff --git a/a.py b/a.py", "index 111..222 100644", "--- a/a.py", "+++ b/a.py",
@@ -32,9 +32,9 @@ test("annotateDiff numbers only added/context lines", () => {
   assert.ok(out.some((l) => l.startsWith("   22 +")));
 });
 
-test("anchorSignals: valid, invalid line, valid range, cross-hunk range drops suggestion", () => {
+test("anchorFindings: valid, invalid line, valid range, cross-hunk range drops suggestion", () => {
   const m = parseDiffLines(DIFF);
-  const r = anchorSignals([
+  const r = anchorFindings([
     sig({ line: 2 }), sig({ line: 99 }), sig({ file: "nope.py" }),
     sig({ line: 2, endLine: 4, suggestion: "x" }), sig({ line: 5, endLine: 21, suggestion: "y" }), sig({ file: "./a.py", line: 22 }),
   ] as any, m);
@@ -54,12 +54,12 @@ test("range comments carry start_line", () => {
 
 test("parseResponse: prose is not ok, empty array is ok, array recommendation survives rendering", () => {
   assert.equal(parseResponse("Looks fine overall.").ok, false);
-  assert.deepEqual(parseResponse('{"signals": []}'), { ok: true, signals: [], dropped: 0 });
-  const r = parseResponse('```json\n{"signals":[{"id":1,"category":"Security","severity":"HIGH","confidence":"85%","file":"a.py","line":"2","title":"t","description":"d","recommendation":["do A","do B"]},{"bad":true}]}\n```');
-  assert.equal(r.ok, true); assert.equal(r.dropped, 1); assert.equal(r.signals.length, 1);
-  assert.equal(r.signals[0].line, 2); assert.equal(r.signals[0].level, "high"); assert.equal(r.signals[0].confidence, 0.75);
-  assert.equal(r.signals[0].recommendation, "do A do B");
-  assert.doesNotThrow(() => renderSignal(r.signals[0]));
+  assert.deepEqual(parseResponse('{"findings": []}'), { ok: true, findings: [], dropped: 0 });
+  const r = parseResponse('```json\n{"findings":[{"id":1,"category":"Security","severity":"HIGH","confidence":"85%","file":"a.py","line":"2","title":"t","description":"d","recommendation":["do A","do B"]},{"bad":true}]}\n```');
+  assert.equal(r.ok, true); assert.equal(r.dropped, 1); assert.equal(r.findings.length, 1);
+  assert.equal(r.findings[0].line, 2); assert.equal(r.findings[0].level, "high"); assert.equal(r.findings[0].confidence, 0.75);
+  assert.equal(r.findings[0].recommendation, "do A do B");
+  assert.doesNotThrow(() => renderFinding(r.findings[0]));
 });
 
 test("CRLF diffs match LF line maps and annotate blank context", () => {
@@ -75,18 +75,18 @@ test("CRLF diffs match LF line maps and annotate blank context", () => {
   assert.ok(annotateDiff(crlf).includes("    2  "));
 });
 
-test("anchorSignals drops absurd endLine without hanging", () => {
+test("anchorFindings drops absurd endLine without hanging", () => {
   const m = parseDiffLines(DIFF);
   const started = Date.now();
-  const r = anchorSignals([sig({ line: 2, endLine: 2_147_483_647, suggestion: "x" }) as any], m);
+  const r = anchorFindings([sig({ line: 2, endLine: 2_147_483_647, suggestion: "x" }) as any], m);
   assert.ok(Date.now() - started < 1_000);
   assert.equal(r.anchored.length, 1);
   assert.equal(r.anchored[0].endLine, undefined);
   assert.equal(r.anchored[0].suggestion, undefined);
 });
 
-test("renderSignal picks a fence longer than any backtick run in the suggestion", () => {
-  const body = renderSignal(sig({ suggestion: "use ````code```` here" }) as any, 2000);
+test("renderFinding picks a fence longer than any backtick run in the suggestion", () => {
+  const body = renderFinding(sig({ suggestion: "use ````code```` here" }) as any, 2000);
   assert.match(body, /\n`````suggestion\n/);
   assert.match(body, /\n`````\n/);
 });
@@ -96,9 +96,9 @@ test("review overview body summarizes inline findings and leftovers", () => {
   assert.match(empty, /No inline findings met the gate/);
   const body = reviewOverviewBody([
     sig({ severity: "high", title: "CRLF blank context", file: "scripts/difflines.ts", line: 34 }),
-    sig({ severity: "critical", confidence: 0.95, title: "Fence length", file: "scripts/signals.ts", line: 128 }),
+    sig({ severity: "critical", confidence: 0.95, title: "Fence length", file: "scripts/findings.ts", line: 128 }),
   ] as any, 0.85, [sig({ confidence: 0.5, title: "Low confidence note", line: 99 }) as any]);
-  assert.match(body, /## PRSignals review/);
+  assert.match(body, /## ReviewBrief/);
   assert.match(body, /2 inline findings \(critical\/high with confidence ≥ 0\.85\)/);
   assert.match(body, /\| critical \| 1 \|/);
   assert.match(body, /\| high \| 1 \|/);

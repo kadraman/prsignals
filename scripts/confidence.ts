@@ -1,5 +1,5 @@
-import { LEVEL_BASE } from "./signals.ts";
-import type { ConfidenceBreakdown, EvidenceStatus, Signal } from "./signals.ts";
+import { LEVEL_BASE } from "./findings.ts";
+import type { ConfidenceBreakdown, EvidenceStatus, Finding } from "./findings.ts";
 import { resolvePath } from "./difflines.ts";
 import type { FileLines, LineMap } from "./difflines.ts";
 
@@ -17,12 +17,12 @@ const stripAnnotation = (line: string) => line.replace(/^\s*\d+\s[+ ]/, "");
 const stripMarker = (line: string) => line.replace(/^[+-]\s?/, "");
 
 /** Deterministically check that the quoted evidence really appears at (or within 2 lines of) the cited lines. */
-export function verifyEvidence(signal: Signal, lines: FileLines | undefined): EvidenceStatus {
-  const raw = signal.evidence?.trim();
+export function verifyEvidence(finding: Finding, lines: FileLines | undefined): EvidenceStatus {
+  const raw = finding.evidence?.trim();
   if (!raw) return "missing";
   if (!lines) return "not_found";
   const window: string[] = [];
-  for (let n = signal.line - 2; n <= (signal.endLine ?? signal.line) + 2; n++) {
+  for (let n = finding.line - 2; n <= (finding.endLine ?? finding.line) + 2; n++) {
     const text = lines.text.get(n);
     if (text !== undefined) window.push(normalize(text));
   }
@@ -38,13 +38,13 @@ export function verifyEvidence(signal: Signal, lines: FileLines | undefined): Ev
 export interface Agreement { found: number; runs: number }
 
 /** Compute the final confidence from the model's level plus facts the code can check. Pure and deterministic. */
-export function scoreSignal(signal: Signal, map: LineMap, agreement?: Agreement): Signal {
-  const path = resolvePath(map, signal.file);
+export function scoreFinding(finding: Finding, map: LineMap, agreement?: Agreement): Finding {
+  const path = resolvePath(map, finding.file);
   const lines = path ? map.get(path) : undefined;
-  const level = signal.level ?? "low";
+  const level = finding.level ?? "low";
   const base = SCORING.base[level];
-  const anchor = lines?.added.has(signal.line) ? "added" : lines?.context.has(signal.line) ? "context" : "none";
-  const evidence = verifyEvidence(signal, lines);
+  const anchor = lines?.added.has(finding.line) ? "added" : lines?.context.has(finding.line) ? "context" : "none";
+  const evidence = verifyEvidence(finding, lines);
   let agree: ConfidenceBreakdown["agreement"] = "n/a";
   if (agreement && agreement.runs > 1) {
     agree = agreement.found >= agreement.runs ? "all" : agreement.found === 1 ? "single" : "partial";
@@ -55,7 +55,7 @@ export function scoreSignal(signal: Signal, map: LineMap, agreement?: Agreement)
   const raw = base + anchorDelta + evidenceDelta + agreementDelta;
   const confidence = Math.round(Math.min(1, Math.max(0, raw)) * 100) / 100;
   return {
-    ...signal, level, confidence,
+    ...finding, level, confidence,
     confidenceBreakdown: { level, base, anchor, anchorDelta, evidence, evidenceDelta, agreement: agree, agreementDelta },
   };
 }
@@ -63,22 +63,22 @@ export function scoreSignal(signal: Signal, map: LineMap, agreement?: Agreement)
 const LEVEL_RANK = { high: 3, medium: 2, low: 1 } as const;
 
 /**
- * Group the signals of several independent runs into findings. Two signals are the same finding when they
- * share file and category and their lines are within `tolerance`. A finding counts each run at most once.
+ * Group findings from several independent runs. Two findings match when they
+ * share file and category and their lines are within `tolerance`. Each run counts at most once.
  */
-export function clusterRuns(runs: Signal[][], tolerance = 3): { signal: Signal; found: number }[] {
-  const clusters: { signal: Signal; seen: Set<number> }[] = [];
-  runs.forEach((signals, runIndex) => {
-    for (const signal of signals) {
-      const match = clusters.find((c) => !c.seen.has(runIndex) && c.signal.file === signal.file
-        && c.signal.category === signal.category && Math.abs(c.signal.line - signal.line) <= tolerance);
+export function clusterRuns(runs: Finding[][], tolerance = 3): { finding: Finding; found: number }[] {
+  const clusters: { finding: Finding; seen: Set<number> }[] = [];
+  runs.forEach((findings, runIndex) => {
+    for (const finding of findings) {
+      const match = clusters.find((c) => !c.seen.has(runIndex) && c.finding.file === finding.file
+        && c.finding.category === finding.category && Math.abs(c.finding.line - finding.line) <= tolerance);
       if (match) {
         match.seen.add(runIndex);
-        if (LEVEL_RANK[signal.level ?? "low"] > LEVEL_RANK[match.signal.level ?? "low"]) match.signal = signal;
+        if (LEVEL_RANK[finding.level ?? "low"] > LEVEL_RANK[match.finding.level ?? "low"]) match.finding = finding;
       } else {
-        clusters.push({ signal, seen: new Set([runIndex]) });
+        clusters.push({ finding, seen: new Set([runIndex]) });
       }
     }
   });
-  return clusters.map((c) => ({ signal: c.signal, found: c.seen.size }));
+  return clusters.map((c) => ({ finding: c.finding, found: c.seen.size }));
 }

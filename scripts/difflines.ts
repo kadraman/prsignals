@@ -1,4 +1,4 @@
-import type { Signal } from "./signals.ts";
+import type { Finding } from "./findings.ts";
 
 export interface FileLines { added: Set<number>; context: Set<number>; text: Map<number, string> }
 export type LineMap = Map<string, FileLines>;
@@ -63,23 +63,23 @@ export function annotateDiff(fileDiff: string): string {
   }).join("\n");
 }
 
-/** Split signals into those GitHub can attach inline and those that must stay in the summary. */
-export function anchorSignals(signals: Signal[], map: LineMap): { anchored: Signal[]; unanchored: Signal[] } {
-  const anchored: Signal[] = [], unanchored: Signal[] = [];
-  for (const signal of signals) {
-    const path = resolvePath(map, signal.file);
+/** Split findings into those GitHub can attach inline and those that must stay in the summary. */
+export function anchorFindings(findings: Finding[], map: LineMap): { anchored: Finding[]; unanchored: Finding[] } {
+  const anchored: Finding[] = [], unanchored: Finding[] = [];
+  for (const finding of findings) {
+    const path = resolvePath(map, finding.file);
     const lines = path ? map.get(path) : undefined;
     const commentable = (n: number) => !!lines && (lines.added.has(n) || lines.context.has(n));
-    if (!path || !lines || !commentable(signal.line)) { unanchored.push(signal); continue; }
-    let { endLine, suggestion } = signal;
+    if (!path || !lines || !commentable(finding.line)) { unanchored.push(finding); continue; }
+    let { endLine, suggestion } = finding;
     if (endLine !== undefined) {
       const maxKnown = Math.max(0, ...lines.added, ...lines.context);
       // Reject absurd / cross-file endLine before looping (untrusted model output).
-      let valid = Number.isInteger(endLine) && endLine > signal.line && endLine <= maxKnown;
-      for (let n = signal.line; valid && n <= (endLine as number); n++) valid = commentable(n);
+      let valid = Number.isInteger(endLine) && endLine > finding.line && endLine <= maxKnown;
+      for (let n = finding.line; valid && n <= (endLine as number); n++) valid = commentable(n);
       if (!valid) { endLine = undefined; suggestion = undefined; } // a range suggestion is unsafe on a single line
     }
-    anchored.push({ ...signal, file: path, endLine, suggestion });
+    anchored.push({ ...finding, file: path, endLine, suggestion });
   }
   return { anchored, unanchored };
 }

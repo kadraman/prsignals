@@ -8,7 +8,7 @@
 # Optional Variables (passed through when set):
 #   LLM_MAX_OUTPUT_TOKENS, LLM_THINKING, LLM_REQUEST_TIMEOUT_MS
 
-name: prsignals
+name: reviewbrief
 
 on:
   pull_request:
