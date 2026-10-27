@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * prsignals calibration harness.
+ * reviewbrief calibration harness.
  *
- * Runs the review engine over previously closed PRs of a repository, collects every signal it produces,
+ * Runs the review engine over previously closed PRs of a repository, collects every finding it produces,
  * lets you label them (true positive / false positive), and reports how precise each confidence level is,
  * which minimum-confidence threshold to use, and how stable the results are between runs.
  *
@@ -11,7 +11,7 @@
  *   node scripts/calibrate.ts report  --repo OWNER/NAME [--target-precision 0.8] [--min-samples 5] [--rescore]
  *
  * `report --rescore` recomputes every confidence from the stored breakdown using the SCORING constants in
- * confidence.ts, so you can tune those constants against the same labeled signals without new model calls.
+ * confidence.ts, so you can tune those constants against the same labeled findings without new model calls.
  *
  * Requires Node.js 22+, an authenticated GitHub CLI (`gh auth login`), and the LLM_* environment variables
  * used by the engine (LLM_API_KEY, LLM_MODEL, ...). A `.env` in the current directory or the repo root is
@@ -52,13 +52,13 @@ type PrInfo = {
   author?: { login?: string; is_bot?: boolean };
 };
 type HumanComment = { path: string; line: number | null; user: string; createdAt: string; body: string };
-type SignalRecord = {
+type FindingRecord = {
   id: string; category: string; severity: string; level?: string; confidence: number;
   confidenceBreakdown?: { level?: string; anchor?: string; evidence?: string; agreement?: string };
   file: string; line: number; endLine?: number; title: string; description: string; evidence?: string;
   anchored?: boolean; inline?: boolean;
 };
-type SignalsFile = { schemaVersion?: number; model?: string; minimumConfidence?: number; signals: SignalRecord[]; failedBatches?: string[] };
+type FindingsFile = { schemaVersion?: number; model?: string; minimumConfidence?: number; findings: FindingRecord[]; failedBatches?: string[] };
 type Label = "tp" | "fp" | "unsure" | "";
 type Row = {
   key: string; pr: number; prUrl: string; file: string; line: number; severity: string; category: string;
@@ -200,7 +200,7 @@ function collect(opts: Options): void {
   const out = outDir(opts, repo);
   const runs = Math.max(1, numOpt(opts, "runs", 1));
   const maxDiffChars = numOpt(opts, "max-diff-chars", 400000);
-  const engine = String(opts.engine ?? join(HERE, "prsignals.ts"));
+  const engine = String(opts.engine ?? join(HERE, "reviewbrief.ts"));
   const prs = listPrs(repo, opts);
 
   console.log(`Selected ${prs.length} closed PR(s) from ${repo}; ${prs.length * runs} engine run(s) planned.\n`);
@@ -233,14 +233,14 @@ function collect(opts: Options): void {
     }
     for (let run = 1; run <= runs; run++) {
       const runDir = join(dir, `run-${run}`);
-      if (existsSync(join(runDir, "signals.json")) && !opts.force) { console.log(`#${pr.number} run ${run}: cached`); continue; }
+      if (existsSync(join(runDir, "findings.json")) && !opts.force) { console.log(`#${pr.number} run ${run}: cached`); continue; }
       mkdirSync(runDir, { recursive: true });
       console.log(`#${pr.number} run ${run}/${runs}: reviewing...`);
       const result = spawnSync(process.execPath, [...process.execArgv, engine, "--diff", diffPath, "--out-dir", runDir,
         "--title", pr.title, "--body", pr.body ?? "", "--pr", String(pr.number), "--repo", repo,
         "--head", pr.headRefName, "--base", pr.baseRefName, "--no-fix-brief"],
       { encoding: "utf8", env: process.env, maxBuffer: 64 * 1024 * 1024 });
-      if (result.status !== 0 || !existsSync(join(runDir, "signals.json"))) {
+      if (result.status !== 0 || !existsSync(join(runDir, "findings.json"))) {
         failed++;
         writeFileSync(join(runDir, "error.txt"), `${result.stderr ?? ""}\n${result.stdout ?? ""}`.slice(-4000));
         console.log(`  failed (exit ${result.status}); see ${join(runDir, "error.txt")}`);
@@ -262,7 +262,7 @@ function prDirs(out: string): number[] {
 }
 
 /** Recompute confidence from a stored breakdown with the current SCORING constants (null if not possible). */
-export function rescore(b: NonNullable<SignalRecord["confidenceBreakdown"]>): number | null {
+export function rescore(b: NonNullable<FindingRecord["confidenceBreakdown"]>): number | null {
   if (!b.level || !b.anchor || !b.evidence) return null;
   const parts = [
     SCORING.base[b.level as keyof typeof SCORING.base],
@@ -278,11 +278,11 @@ function loadRows(out: string, rescoreOn = false): Row[] {
   const rows: Row[] = [];
   for (const number of prDirs(out)) {
     const dir = join(out, "prs", String(number));
-    const file = readJson<SignalsFile>(join(dir, "run-1", "signals.json"));
+    const file = readJson<FindingsFile>(join(dir, "run-1", "findings.json"));
     if (!file) continue;
     const pr = readJson<PrInfo>(join(dir, "pr.json"));
     const comments = readJson<HumanComment[]>(join(dir, "human-comments.json")) ?? [];
-    for (const s of file.signals) {
+    for (const s of file.findings) {
       const b = s.confidenceBreakdown ?? {};
       rows.push({
         key: keyOf(number, s.file, s.line, s.title), pr: number, prUrl: pr?.url ?? "", file: s.file, line: s.line,
@@ -316,7 +316,7 @@ function label(opts: Options): void {
   const out = outDir(opts, repo);
   const csvPath = join(out, "labels.csv");
   const rows = loadRows(out);
-  if (!rows.length) fail("no signals found; run 'collect' first (and check the run-1/error.txt files)");
+  if (!rows.length) fail("no findings found; run 'collect' first (and check the run-1/error.txt files)");
   const existing = loadLabels(csvPath);
   if (existsSync(csvPath)) copyFileSync(csvPath, `${csvPath}.bak`);
   rows.sort((a, b) => a.pr - b.pr || a.file.localeCompare(b.file) || a.line - b.line);
@@ -333,8 +333,8 @@ function label(opts: Options): void {
   writeFileSync(csvPath, lines.join("\n") + "\n");
   const currentKeys = new Set(rows.map((r) => r.key));
   const orphaned = [...existing].filter(([key, v]) => v.label && !currentKeys.has(key)).length;
-  console.log(`Wrote ${csvPath}: ${rows.length} signal(s), ${carried} existing label(s) kept, ${rows.length - carried} to label.`);
-  if (orphaned) console.log(`Warning: ${orphaned} earlier label(s) no longer match any signal (the previous file is saved as labels.csv.bak).`);
+  console.log(`Wrote ${csvPath}: ${rows.length} finding(s), ${carried} existing label(s) kept, ${rows.length - carried} to label.`);
+  if (orphaned) console.log(`Warning: ${orphaned} earlier label(s) no longer match any finding (the previous file is saved as labels.csv.bak).`);
   console.log("Open it in a spreadsheet and fill the 'label' column with: tp (real issue), fp (wrong or not worth flagging), or unsure.");
   console.log("Then run: node scripts/calibrate.ts report --repo " + repo);
 }
@@ -353,7 +353,7 @@ function groupTable(title: string, rows: Row[], keyFn: (r: Row) => string, order
   const groups = new Map<string, Row[]>();
   for (const r of rows) { const k = keyFn(r); groups.set(k, [...(groups.get(k) ?? []), r]); }
   const keys = [...groups.keys()].sort((a, b) => order ? order.indexOf(a) - order.indexOf(b) : a.localeCompare(b));
-  const lines = [`### ${title}`, "", "| group | signals | labeled | tp | fp | precision | 95% low | human-commented |", "|---|---:|---:|---:|---:|---:|---:|---:|"];
+  const lines = [`### ${title}`, "", "| group | findings | labeled | tp | fp | precision | 95% low | human-commented |", "|---|---:|---:|---:|---:|---:|---:|---:|"];
   for (const k of keys) {
     const g = tally(groups.get(k)!);
     const labeled = g.tp + g.fp;
@@ -370,12 +370,12 @@ function stability(out: string): string | null {
   for (const number of prDirs(out)) {
     const dir = join(out, "prs", String(number));
     const runs = readdirSync(dir).filter((n) => /^run-\d+$/.test(n)).sort()
-      .map((n) => readJson<SignalsFile>(join(dir, n, "signals.json"))).filter((f): f is SignalsFile => !!f);
+      .map((n) => readJson<FindingsFile>(join(dir, n, "findings.json"))).filter((f): f is FindingsFile => !!f);
     if (runs.length < 2) continue;
     prCount++;
     for (let i = 0; i < runs.length; i++) for (let j = i + 1; j < runs.length; j++) {
       pairs++;
-      const a = runs[i].signals, b = runs[j].signals;
+      const a = runs[i].findings, b = runs[j].findings;
       const used = new Set<number>();
       let m = 0;
       for (const sa of a) {
@@ -398,21 +398,21 @@ function report(opts: Options): void {
   const target = numOpt(opts, "target-precision", 0.8);
   const minSamples = numOpt(opts, "min-samples", 5);
   const rows = loadRows(out, Boolean(opts.rescore));
-  if (!rows.length) fail("no signals found; run 'collect' first");
+  if (!rows.length) fail("no findings found; run 'collect' first");
   const labels = loadLabels(join(out, "labels.csv"));
   for (const r of rows) { const l = labels.get(r.key); if (l) { r.label = l.label; r.notes = l.notes; } }
 
   const prs = new Set(rows.map((r) => r.pr));
   const overall = tally(rows);
   const labeled = overall.tp + overall.fp;
-  const md: string[] = [`# prsignals calibration report: ${repo}`, "",
+  const md: string[] = [`# reviewbrief calibration report: ${repo}`, "",
     ...(opts.rescore ? ["_Confidence values were recomputed with the current SCORING constants (`--rescore`)._", ""] : []),
-    `- PRs analysed: **${prs.size}**; signals: **${rows.length}** (${(rows.length / prs.size).toFixed(1)} per PR)`,
+    `- PRs analysed: **${prs.size}**; findings: **${rows.length}** (${(rows.length / prs.size).toFixed(1)} per PR)`,
     `- labels: tp ${overall.tp}, fp ${overall.fp}, unsure ${overall.unsure}, unlabeled ${overall.unlabeled}`,
     labeled ? `- overall precision: **${pct(overall.tp / labeled)}** (95% lower bound ${pct(wilsonLower(overall.tp, labeled))}, n=${labeled})` : "- overall precision: no tp/fp labels yet", ""];
 
-  md.push("## Threshold sweep", "", `Target precision ${pct(target)}, at least ${minSamples} labeled signals. "per PR" counts all signals at or above the threshold, labeled or not.`, "",
-    "| min confidence | signals/PR | labeled | tp | precision | 95% low | tp kept |", "|---:|---:|---:|---:|---:|---:|---:|");
+  md.push("## Threshold sweep", "", `Target precision ${pct(target)}, at least ${minSamples} labeled findings. "per PR" counts all findings at or above the threshold, labeled or not.`, "",
+    "| min confidence | findings/PR | labeled | tp | precision | 95% low | tp kept |", "|---:|---:|---:|---:|---:|---:|---:|");
   const totalTp = overall.tp;
   let recommended: number | null = null;
   for (let t = 0.3; t <= 0.951; t += 0.05) {
@@ -425,8 +425,8 @@ function report(opts: Options): void {
   }
   md.push("", recommended !== null
     ? `**Recommended MINIMUM_CONFIDENCE: ${recommended.toFixed(2)}** (lowest threshold meeting the target with enough labels).`
-    : labeled ? "**No threshold reaches the target precision with enough labeled samples.** Label more signals, lower the target, or improve the prompt/scoring."
-      : "**No recommendation yet:** label signals first (`label` command). Until then, use the human-commented column as a rough proxy.", "");
+    : labeled ? "**No threshold reaches the target precision with enough labeled samples.** Label more findings, lower the target, or improve the prompt/scoring."
+      : "**No recommendation yet:** label findings first (`label` command). Until then, use the human-commented column as a rough proxy.", "");
 
   md.push("## Breakdowns", "",
     groupTable("By confidence bucket", rows, (r) => bucket(r.confidence)), "",
@@ -435,7 +435,7 @@ function report(opts: Options): void {
     groupTable("By anchor", rows, (r) => r.anchor, ["added", "context", "none", "n/a"]), "",
     groupTable("By severity", rows, (r) => r.severity, ["critical", "high", "medium", "low", "info"]), "",
     groupTable("By category", rows, (r) => r.category), "");
-  md.push("> `human-commented` is the share of signals within 5 lines of a human review comment on the same file. It is a weak proxy (reviewers miss things and comment on style), useful mainly when few labels exist.", "");
+  md.push("> `human-commented` is the share of findings within 5 lines of a human review comment on the same file. It is a weak proxy (reviewers miss things and comment on style), useful mainly when few labels exist.", "");
   const stable = stability(out);
   if (stable) md.push(stable, "");
   else md.push("_Stability: run `collect --runs 2` (or more) to measure how repeatable the results are._", "");

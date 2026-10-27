@@ -1,22 +1,22 @@
-# PRSignals
+# ReviewBrief
 
 AI-powered pull request review for GitHub that works with **any model** (OpenAI, Claude, DeepSeek, OpenRouter, Ollama, anything OpenAI-compatible), **doesn't truncate large PRs**, and writes a **fix brief**: a markdown prompt you can hand to an AI coding assistant to apply the fixes.
 
 - **Large PRs:** the diff is split per file (and per hunk for huge files), reviewed in batches, then merged into one review. Skipped files and failed batches are listed in the comment, never silently dropped.
-- **Structured findings:** the model returns canonical Signals, which PRSignals renders into concise inline comments and GitHub suggestions.
+- **Structured findings:** the model returns canonical Findings, which ReviewBrief renders into concise inline comments and GitHub suggestions.
 - **Any provider:** two protocols cover nearly everything: `openai` (OpenAI-compatible) and `anthropic`.
 - **Fix brief:** `fix-brief.md` lists each actionable finding with file, problem, suggested fix and a "done when" check, plus rules that tell the assistant to verify each finding before changing anything.
-- **TypeScript runtime:** the review pipeline, canonical Signal model, and renderers run on Node.js 22 without third-party packages.
+- **TypeScript runtime:** the review pipeline, canonical Finding model, and renderers run on Node.js 22 without third-party packages.
 
 ## What's in the box
 
 ```
-action.yml                  composite GitHub Action
-scripts/prsignals.ts        review engine (also runs standalone)
-scripts/signals.ts          canonical Signal types and GitHub renderer
-scripts/review-pr.sh        run it against an existing PR from your machine
-examples/prsignals.yml  workflow that uses the action
-.env.example                config template for local runs
+action.yml                 composite GitHub Action
+scripts/reviewbrief.ts     review engine (also runs standalone)
+scripts/findings.ts        canonical Finding types and GitHub renderer
+scripts/review-pr.sh       run it against an existing PR from your machine
+examples/reviewbrief.yml   workflow that uses the action
+.env.example               config template for local runs
 ```
 
 ---
@@ -44,8 +44,8 @@ scripts/review-pr.sh 123 --repo OWNER/NAME --post
 scripts/review-pr.sh 123 --repo OWNER/NAME --provider anthropic --model <model-name>
 ```
 
-Output goes to `./prsignals-out/pr-123/`: `review.md`, `fix-brief.md` (if anything was actionable), and the raw `pr.diff`.
-The renderer also writes `review-payload.json` (confidence-filtered inline GitHub review comments) and `signals.json` (every scored signal with its confidence breakdown).
+Output goes to `./reviewbrief-out/pr-123/`: `review.md`, `fix-brief.md` (if anything was actionable), and the raw `pr.diff`.
+The renderer also writes `review-payload.json` (confidence-filtered inline GitHub review comments) and `findings.json` (every scored finding with its confidence breakdown).
 
 Notes:
 - Inside a clone of the repo you can omit `--repo`.
@@ -55,15 +55,15 @@ Notes:
 You can also call the engine directly on any diff:
 
 ```bash
-git diff main...HEAD | node --experimental-strip-types scripts/prsignals.ts --out-dir out
-node --experimental-strip-types scripts/prsignals.ts --diff my.diff --dry-run
+git diff main...HEAD | node --experimental-strip-types scripts/reviewbrief.ts --out-dir out
+node --experimental-strip-types scripts/reviewbrief.ts --diff my.diff --dry-run
 ```
 
 ---
 
 ## 2. Run it on every PR (GitHub Actions)
 
-1. Put this folder in a public (or private) repo, e.g. `kadraman/prsignals`, and tag a release (`v1`).
+1. Put this folder in a public (or private) repo, e.g. `kadraman/reviewbrief`, and tag a release (`v1`).
 2. In the repo you want reviewed, add **Settings → Secrets and variables → Actions**:
 
    | Name | Type | Notes |
@@ -73,7 +73,7 @@ node --experimental-strip-types scripts/prsignals.ts --diff my.diff --dry-run
    | `LLM_PROVIDER` | Variable | `openai` (default) or `anthropic` |
    | `LLM_BASE_URL` | Variable | optional API root override |
 
-3. Copy `examples/prsignals.yml` to `.github/workflows/prsignals.yml` and replace `kadraman/prsignals@v1` with your action reference.
+3. Copy `examples/reviewbrief.yml` to `.github/workflows/reviewbrief.yml` and replace `kadraman/reviewbrief@v1` with your action reference.
 
 Use `actions/checkout` with `fetch-depth: 0` (the example does) so very large diffs aren't limited by GitHub's API.
 
@@ -134,7 +134,7 @@ or paste/attach it in Copilot, Cursor, or a chat session. The brief tells the as
 2. A file larger than `piece-chars` (capped by `batch-chars`) is split on hunk boundaries (and on line boundaries inside giant hunks); every part keeps the file header. Split parts are reviewed alone so they are not packed back into one oversized call.
 3. Other pieces are packed into batches up to `batch-chars`.
 4. Each batch is reviewed in its own call (retrying 429/5xx/529 with backoff). If the model still returns invalid JSON (or the request fails), the batch is split further and retried up to two times.
-5. Each response is parsed into the canonical Signal schema. Confidence is computed in code from the model's high/medium/low level plus checked evidence (and optional agreement across consistency runs). Inline comments are deduplicated with highest confidence winning, then gated to severity `critical`/`high` above `minimum-confidence` (medium and below are overview-only) and ranked deterministically by severity, confidence, file, line, title, and category. The prompt asks the model to skip style, typing, and docs nits so fewer low-value signals are emitted.
+5. Each response is parsed into the canonical Finding schema. Confidence is computed in code from the model's high/medium/low level plus checked evidence (and optional agreement across consistency runs). Inline comments are deduplicated with highest confidence winning, then gated to severity `critical`/`high` above `minimum-confidence` (medium and below are overview-only) and ranked deterministically by severity, confidence, file, line, title, and category. The prompt asks the model to skip style, typing, and docs nits so fewer low-value findings are emitted.
 
 Limitations: batches are reviewed independently, so problems that span files in different batches can be missed. Cost scales with PR size; `max-batches` caps it. If **every** batch fails (bad key, wrong model name), the run fails instead of posting an error comment.
 

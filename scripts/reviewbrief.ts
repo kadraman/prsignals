@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-/** PRSignals review pipeline. Requires Node.js 22.6 or newer. */
+/** ReviewBrief pipeline. Requires Node.js 22.6 or newer. */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { annotateDiff, anchorSignals, parseDiffLines } from "./difflines.ts";
-import { githubReviewPayload, parseResponse, partitionInline, rankSignals, renderSignal, type Signal } from "./signals.ts";
-import { clusterRuns, scoreSignal } from "./confidence.ts";
+import { annotateDiff, anchorFindings, parseDiffLines } from "./difflines.ts";
+import { githubReviewPayload, parseResponse, partitionInline, rankFindings, renderFinding, type Finding } from "./findings.ts";
+import { clusterRuns, scoreFinding } from "./confidence.ts";
 
 const VERSION = "1.0.0";
 const DEFAULT_BASE: Record<string, string> = {
@@ -14,25 +14,25 @@ const DEFAULT_BASE: Record<string, string> = {
 };
 const RETRY_CODES = new Set([429, 500, 502, 503, 504, 529]);
 const SKIP_PATTERN = /(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock|go\.sum|Gemfile\.lock|composer\.lock)$|\.min\.(js|css)$|\.(png|jpe?g|gif|svg|ico|pdf|woff2?|map)$/i;
-const REVIEW_SYSTEM = `You are a senior engineer reviewing part of a pull request diff. Return ONLY a JSON object with a top-level 'signals' array. Each item must have: id, category (security|quality|maintainability|performance|architecture|testing|documentation|compliance), severity (critical|high|medium|low|info), confidence ("high"|"medium"|"low"), file, line, title, description, evidence, and optional endLine, recommendation, suggestion, ruleId, references.
+const REVIEW_SYSTEM = `You are a senior engineer reviewing part of a pull request diff. Return ONLY a JSON object with a top-level 'findings' array. Each item must have: id, category (security|quality|maintainability|performance|architecture|testing|documentation|compliance), severity (critical|high|medium|low|info), confidence ("high"|"medium"|"low"), file, line, title, description, evidence, and optional endLine, recommendation, suggestion, ruleId, references.
 
 Confidence rubric (choose exactly one):
 - "high": you can quote the exact changed line(s) that cause the problem and explain precisely how it fails (for example an unchecked null dereference, user input concatenated into a SQL string, a resource opened and never closed).
 - "medium": the pattern is usually a bug but depends on code you cannot see in this diff, or it needs an unusual input to fail.
 - "low": a possible concern, a judgment call, or a guess.
 
-Severity rubric (be strict — most nits are not worth a signal at all):
+Severity rubric (be strict — most nits are not worth a finding at all):
 - "critical": exploitable security flaw, data loss or corruption, or a crash on a common path.
 - "high": a bug that breaks normal use of the changed feature, or a clear security/correctness defect a reviewer should block on.
 - "medium": a bug in edge cases, or missing error handling that can fail in production.
 - "low": a minor correctness or robustness issue that is still a real defect (not style).
 - "info": do not use unless the observation is essential context for another finding; prefer omitting.
 
-Emit signals only for concrete, actionable defects with a real recommendation: wrong behavior, security risks, resource leaks, races, broken error handling, silent data corruption, or clear API contract breaks. Prefer an empty signals array over filler.
+Emit findings only for concrete, actionable defects with a real recommendation: wrong behavior, security risks, resource leaks, races, broken error handling, silent data corruption, or clear API contract breaks. Prefer an empty findings array over filler.
 
-Do NOT emit signals for: style or readability; naming; variable shadowing; TypeScript \`any\` / type assertions; missing comments; docs wording; test brittleness or assertion tightness; speculative "might confuse" maintainability; CSS preferences; dead code that is merely unused; or findings whose conclusion is "no bug", "works as intended", "accept as designed", "no change", or "none".
+Do NOT emit findings for: style or readability; naming; variable shadowing; TypeScript \`any\` / type assertions; missing comments; docs wording; test brittleness or assertion tightness; speculative "might confuse" maintainability; CSS preferences; dead code that is merely unused; or findings whose conclusion is "no bug", "works as intended", "accept as designed", "no change", or "none".
 
-Evidence: every signal must include \`evidence\`, the exact text of the changed line(s) the finding is about, copied from the diff without the leading line number or +/- marker (separate several lines with \\n). Never paraphrase. If you cannot quote evidence, do not report the finding. A suggestion must contain replacement code only.
+Evidence: every finding must include \`evidence\`, the exact text of the changed line(s) the finding is about, copied from the diff without the leading line number or +/- marker (separate several lines with \\n). Never paraphrase. If you cannot quote evidence, do not report the finding. A suggestion must contain replacement code only.
 
 In the diff, every added (+) and unchanged context line is prefixed with its line number in the new file; removed (-) lines have no number. Report \`line\` and \`endLine\` using only those numbers, and only for lines that carry one. A \`suggestion\` replaces exactly the lines \`line\` through \`endLine\` (or just \`line\` when there is no \`endLine\`).
 
@@ -60,7 +60,7 @@ async function chat(provider: string, model: string, key: string, baseUrl: strin
   const headers: Record<string, string> = anthropic
     ? { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" }
     : { "content-type": "application/json", authorization: `Bearer ${key}` };
-  headers["user-agent"] = `prsignals/${VERSION}`;
+  headers["user-agent"] = `reviewbrief/${VERSION}`;
   const body: Record<string, unknown> = anthropic
     ? { model, max_tokens: maxOut, system, messages: [{ role: "user", content: user }] }
     : { model, max_tokens: maxOut, messages: [{ role: "system", content: system }, { role: "user", content: user }] };
@@ -208,8 +208,8 @@ function batchPrompt(ctx: Context, index: number, total: number, batch: Piece[])
   return `PR title: ${ctx.title}\nPR description: ${ctx.body}\n\nThis is part ${index} of ${total} of the diff. Other parts are reviewed separately, so do not complain about missing context from other files.\nFiles in this part:\n${batch.map((p) => `- ${p.label}`).join("\n")}\n\nDiff:\n\n${batch.map((p) => p.text).join("\n")}`;
 }
 type Context = { title: string; body: string; pr: string; repo: string; head: string; base: string };
-type Outcome = { ok: boolean; text: string; signals: Signal[]; dropped: number; files: string[] };
-const JSON_RETRY_SUFFIX = "\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON object {\"signals\": [...]}, no prose and no code fences.";
+type Outcome = { ok: boolean; text: string; findings: Finding[]; dropped: number; files: string[] };
+const JSON_RETRY_SUFFIX = "\n\nYour previous reply was not valid JSON. Reply with ONLY the JSON object {\"findings\": [...]}, no prose and no code fences.";
 const MAX_BISECT_DEPTH = 2;
 
 async function reviewOneBatch(
@@ -233,7 +233,7 @@ async function reviewOneBatch(
     return [{
       ok: false,
       text: `**Review failed for this part** (${reason}). Files: ${files.join(", ")}`,
-      signals: [], dropped: 0, files,
+      findings: [], dropped: 0, files,
     }];
   };
   try {
@@ -247,7 +247,7 @@ async function reviewOneBatch(
     }
     if (!parsed.ok) return fail("model did not return valid JSON");
     console.log(`Batch ${id}: response received (${text.length} characters).`);
-    return [{ ok: true, text, signals: parsed.signals, dropped: parsed.dropped, files }];
+    return [{ ok: true, text, findings: parsed.findings, dropped: parsed.dropped, files }];
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
   }
@@ -313,7 +313,7 @@ function printPlan(
 }
 function readArgs(argv: string[]) {
   const values: Record<string, string> = {
-    diff: "-", outDir: ".prsignals", title: env("PR_TITLE"), body: env("PR_BODY"),
+    diff: "-", outDir: ".reviewbrief", title: env("PR_TITLE"), body: env("PR_BODY"),
     pr: env("PR_NUMBER"), repo: env("REPO"), head: env("PR_HEAD"), base: env("PR_BASE"),
     minimumConfidence: env("MINIMUM_CONFIDENCE", "0.85"), maxInlineComments: env("MAX_INLINE_COMMENTS", "0"),
   };
@@ -329,7 +329,7 @@ function readArgs(argv: string[]) {
     if (arg === "--dry-run" || arg === "--no-fix-brief") { flags.add(arg); continue; }
     if (arg === "--version") { console.log(VERSION); process.exit(0); }
     if (arg === "--help" || arg === "-h") {
-      console.log("Usage: node scripts/prsignals.ts [--diff FILE] [--out-dir DIR] [--dry-run] [--no-fix-brief]\nConfiguration is read from environment variables.");
+      console.log("Usage: node scripts/reviewbrief.ts [--diff FILE] [--out-dir DIR] [--dry-run] [--no-fix-brief]\nConfiguration is read from environment variables.");
       process.exit(0);
     }
     const name = names[arg];
@@ -361,10 +361,10 @@ async function main(): Promise<number> {
   const { pieces, skipped } = splitDiff(diff, batchChars, pieceChars);
   if (!pieces.length) {
     const note = `No reviewable changes found.${skipped.length ? ` Skipped: ${skipped.join(", ")}` : ""}`;
-    writeFileSync(reviewPath, `## PRSignals\n\n${note}\n`);
+    writeFileSync(reviewPath, `## ReviewBrief\n\n${note}\n`);
     writeFileSync(join(args.outDir, "review-payload.json"), JSON.stringify(githubReviewPayload([]), null, 2));
-    writeFileSync(join(args.outDir, "signals.json"), JSON.stringify({
-      schemaVersion: 1, engineVersion: VERSION, repo: ctx.repo, pr: ctx.pr, signals: [], failedBatches: [], dropped: 0,
+    writeFileSync(join(args.outDir, "findings.json"), JSON.stringify({
+      schemaVersion: 1, engineVersion: VERSION, repo: ctx.repo, pr: ctx.pr, findings: [], failedBatches: [], dropped: 0,
     }, null, 2));
     console.log(note); return 0;
   }
@@ -395,29 +395,29 @@ async function main(): Promise<number> {
   const outcomes = runOutcomes[0];
   const failed = outcomes.filter((o) => !o.ok);
   if (failed.length === outcomes.length) {
-    writeFileSync(reviewPath, `## PRSignals\n\n${outcomes.map((item) => item.text).join("\n\n")}\n`);
+    writeFileSync(reviewPath, `## ReviewBrief\n\n${outcomes.map((item) => item.text).join("\n\n")}\n`);
     console.error(`Every batch failed; nothing to report:\n${outcomes.map((item) => item.text).join("\n")}`);
     return 1;
   }
   const lineMap = parseDiffLines(diff); // the original, un-annotated diff
-  const perRun = runOutcomes.map((run) => run.flatMap((o) => o.signals));
+  const perRun = runOutcomes.map((run) => run.flatMap((o) => o.findings));
   const agreementOn = runCount > 1 && runOutcomes.every((run) => run.every((o) => o.ok));
   if (runCount > 1 && !agreementOn) {
     console.log("::warning::A batch failed in a consistency run; agreement scoring is disabled for this review.");
   }
-  const signals: Signal[] = clusterRuns(perRun).map(({ signal, found }) =>
-    scoreSignal(signal, lineMap, agreementOn ? { found, runs: runCount } : undefined));
-  const safeRender = (signal: Signal): string => {
-    try { return renderSignal(signal); }
+  const findings: Finding[] = clusterRuns(perRun).map(({ finding, found }) =>
+    scoreFinding(finding, lineMap, agreementOn ? { found, runs: runCount } : undefined));
+  const safeRender = (finding: Finding): string => {
+    try { return renderFinding(finding); }
     catch (error) {
-      return `**${signal.title}** (${signal.file}:${signal.line}): could not render details (${error instanceof Error ? error.message : String(error)})`;
+      return `**${finding.title}** (${finding.file}:${finding.line}): could not render details (${error instanceof Error ? error.message : String(error)})`;
     }
   };
   const nothingFound = failed.length === 0
-    ? "No actionable signals found."
-    : "No actionable signals found in the parts that were reviewed.";
-  const final = signals.length ? rankSignals(signals).map(safeRender).join("\n\n") : nothingFound;
-  const { anchored, unanchored } = anchorSignals(signals, lineMap);
+    ? "No actionable findings found."
+    : "No actionable findings found in the parts that were reviewed.";
+  const final = findings.length ? rankFindings(findings).map(safeRender).join("\n\n") : nothingFound;
+  const { anchored, unanchored } = anchorFindings(findings, lineMap);
   const payload = githubReviewPayload(anchored, minimumConfidence, maxInlineComments, safeRender, unanchored);
   writeFileSync(join(args.outDir, "review-payload.json"), JSON.stringify(payload, null, 2));
   const footer = [`_Reviewed ${pieces.length} diff pieces in ${batches.length} API call(s) with \`${model}\` (${provider})._`];
@@ -428,20 +428,20 @@ async function main(): Promise<number> {
     console.log(`::warning::${failed.length} of ${outcomes.length} review parts failed; see the review footer.`);
   }
   const dropped = outcomes.reduce((sum, o) => sum + o.dropped, 0);
-  if (dropped) footer.push(`${dropped} malformed signal(s) were discarded.`);
+  if (dropped) footer.push(`${dropped} malformed finding(s) were discarded.`);
   if (runCount > 1 && !agreementOn) footer.push("Consistency runs: a batch failed in at least one extra run, so agreement scoring was not applied.");
-  const keyOf = (s: Signal) => `${s.file}\u0000${s.line}\u0000${s.title}`;
+  const keyOf = (s: Finding) => `${s.file}\u0000${s.line}\u0000${s.title}`;
   const inlineKeys = new Set(partitionInline(anchored, minimumConfidence, maxInlineComments).inline.map(keyOf));
   const records = [
     ...anchored.map((s) => ({ ...s, anchored: true, inline: inlineKeys.has(keyOf(s)) })),
     ...unanchored.map((s) => ({ ...s, anchored: false, inline: false })),
   ].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || a.title.localeCompare(b.title));
-  writeFileSync(join(args.outDir, "signals.json"), JSON.stringify({
+  writeFileSync(join(args.outDir, "findings.json"), JSON.stringify({
     schemaVersion: 1, engineVersion: VERSION, repo: ctx.repo, pr: ctx.pr, provider, model, runs: runCount,
     temperature: env("LLM_TEMPERATURE", "0"), minimumConfidence, agreementScoring: agreementOn,
-    failedBatches: failed.flatMap((o) => o.files), dropped, signals: records,
+    failedBatches: failed.flatMap((o) => o.files), dropped, findings: records,
   }, null, 2));
-  let output = `## PRSignals\n\n${final}\n\n---\n${footer.join("\n\n")}`;
+  let output = `## ReviewBrief\n\n${final}\n\n---\n${footer.join("\n\n")}`;
   if (env("FIX_BRIEF", "true").toLowerCase() === "true" && !flags.has("--no-fix-brief")) {
     const brief = await makeFixBrief(config, ctx, final);
     if (brief) writeFileSync(briefPath, brief);

@@ -1,4 +1,4 @@
-name: prsignals
+name: reviewbrief
 description: AI-powered pull request reviews with any LLM, large-PR support, and fix briefs for AI coding assistants.
 author: kadraman
 
@@ -92,10 +92,10 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
-        out="$RUNNER_TEMP/prsignals"
+        out="$RUNNER_TEMP/reviewbrief"
         mkdir -p "$out"
         if [ -z "${BASE_REF:-}" ]; then
-          echo "::error::prsignals must run on a pull_request event."
+          echo "::error::reviewbrief must run on a pull_request event."
           exit 1
         fi
         git fetch --no-tags --quiet origin "$BASE_REF" 2>/dev/null || true
@@ -137,8 +137,8 @@ runs:
         REPO: ${{ github.repository }}
       run: |
         set -euo pipefail
-        out="$RUNNER_TEMP/prsignals"
-        node --experimental-strip-types "$ACTION_PATH/scripts/prsignals.ts" --diff "$out/pr.diff" --out-dir "$out"
+        out="$RUNNER_TEMP/reviewbrief"
+        node --experimental-strip-types "$ACTION_PATH/scripts/reviewbrief.ts" --diff "$out/pr.diff" --out-dir "$out"
         echo "review_path=$out/review.md" >> "$GITHUB_OUTPUT"
         if [ -f "$out/fix-brief.md" ]; then
           echo "has_brief=true" >> "$GITHUB_OUTPUT"

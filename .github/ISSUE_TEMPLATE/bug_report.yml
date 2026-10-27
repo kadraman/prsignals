@@ -16,7 +16,7 @@ body:
       options:
         - GitHub Action (workflow)
         - Local (`scripts/review-pr.sh` / `review-pr.ps1`)
-        - Direct (`node … scripts/prsignals.ts`)
+        - Direct (`node … scripts/reviewbrief.ts`)
         - Other / unsure
     validations:
       required: true
@@ -43,7 +43,7 @@ body:
     attributes:
       label: What happened?
       description: Expected vs actual behaviour.
-      placeholder: Expected a review comment / got HTTP 400 / empty signals / …
+      placeholder: Expected a review comment / got HTTP 400 / empty findings / …
     validations:
       required: true
 
