@@ -5,7 +5,10 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, appendFileS
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { annotateDiff, anchorFindings, parseDiffLines } from "./difflines.ts";
-import { githubReviewPayload, parseResponse, partitionInline, rankFindings, renderFinding, type Finding } from "./findings.ts";
+import {
+  FIX_BRIEF_MEDIUM_CONFIDENCE, fixBriefFindings, githubReviewPayload, parseResponse, partitionInline,
+  publishableFindings, rankFindings, renderFinding, repairFindingsPrompt, type Finding,
+} from "./findings.ts";
 import { clusterRuns, scoreFinding } from "./confidence.ts";
 
 const VERSION = "1.0.0";
@@ -246,8 +249,26 @@ async function reviewOneBatch(
       parsed = parseResponse(text);
     }
     if (!parsed.ok) return fail("model did not return valid JSON");
+    let findings = parsed.findings;
+    let dropped = parsed.dropped;
+    // One repair pass for schema-invalid items (not a full re-review of the batch).
+    if (parsed.rejected.length) {
+      console.warn(`Batch ${id}: ${parsed.rejected.length} malformed finding(s); requesting repair.`);
+      const repairText = await chat(
+        ...config.args, REVIEW_SYSTEM,
+        `${prompt}\n\nModel reply to repair:\n${text.slice(0, 4000)}${repairFindingsPrompt(parsed.rejected)}`,
+      );
+      const repaired = parseResponse(repairText);
+      if (repaired.ok && repaired.findings.length) {
+        findings = [...findings, ...repaired.findings];
+        dropped = Math.max(0, parsed.dropped - repaired.findings.length);
+        console.log(`Batch ${id}: repair recovered ${repaired.findings.length} finding(s); ${dropped} still discarded.`);
+      } else {
+        console.warn(`Batch ${id}: repair did not recover findings; keeping ${dropped} discarded.`);
+      }
+    }
     console.log(`Batch ${id}: response received (${text.length} characters).`);
-    return [{ ok: true, text, findings: parsed.findings, dropped: parsed.dropped, files }];
+    return [{ ok: true, text, findings, dropped, files }];
   } catch (error) {
     return fail(error instanceof Error ? error.message : String(error));
   }
@@ -418,9 +439,11 @@ async function main(): Promise<number> {
     : "No actionable findings found in the parts that were reviewed.";
   const final = findings.length ? rankFindings(findings).map(safeRender).join("\n\n") : nothingFound;
   const { anchored, unanchored } = anchorFindings(findings, lineMap);
+  const published = publishableFindings(anchored, unanchored, minimumConfidence, maxInlineComments);
   const payload = githubReviewPayload(anchored, minimumConfidence, maxInlineComments, safeRender, unanchored);
-  writeFileSync(join(args.outDir, "review-payload.json"), JSON.stringify(payload, null, 2));
+  const reviewScope = env("REVIEW_SCOPE");
   const footer = [`_Reviewed ${pieces.length} diff pieces in ${batches.length} API call(s) with \`${model}\` (${provider})._`];
+  if (reviewScope) footer.push(`_${reviewScope}_`);
   if (skipped.length) footer.push(`Skipped: ${skipped.join(", ")}`);
   if (unreviewed.length) footer.push(`**Not reviewed (exceeded MAX_BATCHES=${maxBatches}):** ${unreviewed.join(", ")}`);
   if (failed.length) {
@@ -439,11 +462,24 @@ async function main(): Promise<number> {
   writeFileSync(join(args.outDir, "findings.json"), JSON.stringify({
     schemaVersion: 1, engineVersion: VERSION, repo: ctx.repo, pr: ctx.pr, provider, model, runs: runCount,
     temperature: env("LLM_TEMPERATURE", "0"), minimumConfidence, agreementScoring: agreementOn,
+    reviewScope: reviewScope || null,
     failedBatches: failed.flatMap((o) => o.files), dropped, findings: records,
   }, null, 2));
+  // Append the same footer to the gated PR payload so create-review shows scope/failures.
+  payload.body = `${payload.body.trimEnd()}\n\n---\n${footer.join("\n\n")}\n`;
+  writeFileSync(join(args.outDir, "review-payload.json"), JSON.stringify(payload, null, 2));
   let output = `## ReviewBrief\n\n${final}\n\n---\n${footer.join("\n\n")}`;
   if (env("FIX_BRIEF", "true").toLowerCase() === "true" && !flags.has("--no-fix-brief")) {
-    const brief = await makeFixBrief(config, ctx, final);
+    const fixBriefMediumConfidence = Number(env("FIX_BRIEF_MEDIUM_CONFIDENCE", String(FIX_BRIEF_MEDIUM_CONFIDENCE)));
+    const forBriefFindings = fixBriefFindings(
+      [...anchored, ...unanchored], minimumConfidence, fixBriefMediumConfidence,
+    );
+    const forBrief = forBriefFindings.length
+      ? forBriefFindings.map(safeRender).join("\n\n")
+      : "NO_ACTIONABLE_FINDINGS";
+    const brief = forBrief === "NO_ACTIONABLE_FINDINGS"
+      ? null
+      : await makeFixBrief(config, ctx, forBrief);
     if (brief) writeFileSync(briefPath, brief);
   }
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${output}\n`);

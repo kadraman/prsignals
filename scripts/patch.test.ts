@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseDiffLines, annotateDiff, anchorFindings } from "./difflines.ts";
-import { githubReviewPayload, parseResponse, renderFinding, reviewOverviewBody, toReviewComment } from "./findings.ts";
+import {
+  findingRejectReason, githubReviewPayload, parseResponse, renderFinding, repairFindingsPrompt,
+  reviewOverviewBody, toReviewComment,
+} from "./findings.ts";
 
 const DIFF = [
   "diff --git a/a.py b/a.py", "index 111..222 100644", "--- a/a.py", "+++ b/a.py",
@@ -54,12 +57,29 @@ test("range comments carry start_line", () => {
 
 test("parseResponse: prose is not ok, empty array is ok, array recommendation survives rendering", () => {
   assert.equal(parseResponse("Looks fine overall.").ok, false);
-  assert.deepEqual(parseResponse('{"findings": []}'), { ok: true, findings: [], dropped: 0 });
+  assert.deepEqual(parseResponse('{"findings": []}'), { ok: true, findings: [], dropped: 0, rejected: [] });
   const r = parseResponse('```json\n{"findings":[{"id":1,"category":"Security","severity":"HIGH","confidence":"85%","file":"a.py","line":"2","title":"t","description":"d","recommendation":["do A","do B"]},{"bad":true}]}\n```');
   assert.equal(r.ok, true); assert.equal(r.dropped, 1); assert.equal(r.findings.length, 1);
+  assert.equal(r.rejected.length, 1);
+  assert.match(r.rejected[0].reason, /category/);
   assert.equal(r.findings[0].line, 2); assert.equal(r.findings[0].level, "high"); assert.equal(r.findings[0].confidence, 0.75);
   assert.equal(r.findings[0].recommendation, "do A do B");
   assert.doesNotThrow(() => renderFinding(r.findings[0]));
+});
+
+test("findingRejectReason and repairFindingsPrompt describe schema failures", () => {
+  assert.equal(findingRejectReason({
+    category: "security", severity: "high", file: "a.py", line: 1, title: "t", description: "d",
+  }), null);
+  assert.match(findingRejectReason({ category: "bug", severity: "high", file: "a.py", line: 1, title: "t", description: "d" }) ?? "", /category/);
+  assert.match(findingRejectReason({ category: "security", severity: "high", file: "a.py", line: "x", title: "t", description: "d" }) ?? "", /line/);
+  const prompt = repairFindingsPrompt([{
+    index: 0, reason: "line must be a positive integer (got \"x\")",
+    row: { category: "security", severity: "high", file: "a.py", line: "x", title: "t", description: "d" },
+  }]);
+  assert.match(prompt, /Rejected items/);
+  assert.match(prompt, /line must be a positive integer/);
+  assert.match(prompt, /Do NOT resend the findings that were already accepted/);
 });
 
 test("CRLF diffs match LF line maps and annotate blank context", () => {
@@ -91,32 +111,55 @@ test("renderFinding picks a fence longer than any backtick run in the suggestion
   assert.match(body, /\n`````\n/);
 });
 
-test("review overview body summarizes inline findings and leftovers", () => {
+test("review overview body summarizes inline findings; below-gate stay off the PR", () => {
   const empty = reviewOverviewBody([], 0.85);
   assert.match(empty, /No inline findings met the gate/);
+  assert.doesNotMatch(empty, /Also noted/);
   const body = reviewOverviewBody([
     sig({ severity: "high", title: "CRLF blank context", file: "scripts/difflines.ts", line: 34 }),
     sig({ severity: "critical", confidence: 0.95, title: "Fence length", file: "scripts/findings.ts", line: 128 }),
-  ] as any, 0.85, [sig({ confidence: 0.5, title: "Low confidence note", line: 99 }) as any]);
+  ] as any, 0.85, {
+    unanchored: [sig({
+      confidence: 0.9, title: "Unanchored high", file: "other.py", line: 1,
+      description: "Cannot attach this line.", recommendation: "Move the change onto an added line.",
+    }) as any],
+  });
   assert.match(body, /## ReviewBrief/);
   assert.match(body, /2 inline findings \(critical\/high with confidence ≥ 0\.85\)/);
   assert.match(body, /\| critical \| 1 \|/);
   assert.match(body, /\| high \| 1 \|/);
   assert.match(body, /\*\*CRLF blank context\*\* \(`scripts\/difflines\.ts:34`\)/);
-  assert.match(body, /### Also noted \(not inline\)/);
-  assert.match(body, /\*\*Low confidence note\*\*/);
+  assert.match(body, /### Could not place inline/);
+  assert.match(body, /\*\*Unanchored high\*\*/);
+  assert.match(body, /Cannot attach this line\./);
+  assert.match(body, /\*\*Recommendation:\*\* Move the change onto an added line\./);
+  assert.doesNotMatch(body, /Also noted/);
   const payload = githubReviewPayload([
     sig({ confidence: 0.9, title: "Keep" }),
     sig({ confidence: 0.5, title: "Drop" }),
     sig({ severity: "low", confidence: 0.95, title: "Low severity drop" }),
     sig({ severity: "medium", confidence: 0.99, title: "Medium never inline" }),
-  ] as any, 0.85, undefined, undefined, [sig({ file: "other.py", line: 1, title: "Unanchored", confidence: 0.9 }) as any]);
+  ] as any, 0.85, undefined, undefined, [
+    sig({ file: "other.py", line: 1, title: "Unanchored high", confidence: 0.9, description: "d", recommendation: "fix it" }) as any,
+    sig({ file: "other.py", line: 2, title: "Unanchored medium", severity: "medium", confidence: 0.99, description: "skip" }) as any,
+  ]);
   assert.match(payload.body, /1 inline finding/);
   assert.match(payload.body, /\*\*Keep\*\*/);
-  assert.match(payload.body, /### Also noted \(not inline\)/);
-  assert.match(payload.body, /\*\*Drop\*\*/);
-  assert.match(payload.body, /\*\*Low severity drop\*\*/);
-  assert.match(payload.body, /\*\*Medium never inline\*\*/);
-  assert.match(payload.body, /\*\*Unanchored\*\*/);
+  assert.doesNotMatch(payload.body, /Also noted/);
+  assert.doesNotMatch(payload.body, /\*\*Drop\*\*/);
+  assert.doesNotMatch(payload.body, /\*\*Low severity drop\*\*/);
+  assert.doesNotMatch(payload.body, /\*\*Medium never inline\*\*/);
+  assert.doesNotMatch(payload.body, /\*\*Unanchored medium\*\*/);
+  assert.match(payload.body, /### Could not place inline/);
+  assert.match(payload.body, /\*\*Unanchored high\*\*/);
+  assert.match(payload.body, /\*\*Recommendation:\*\* fix it/);
   assert.equal(payload.comments.length, 1);
+  const capped = githubReviewPayload([
+    sig({ confidence: 0.95, title: "First", line: 2 }),
+    sig({ confidence: 0.9, title: "Second", line: 3, description: "Over cap.", recommendation: "Raise the cap." }),
+  ] as any, 0.85, 1);
+  assert.equal(capped.comments.length, 1);
+  assert.match(capped.body, /### Over the inline cap/);
+  assert.match(capped.body, /\*\*Second\*\*/);
+  assert.match(capped.body, /\*\*Recommendation:\*\* Raise the cap\./);
 });

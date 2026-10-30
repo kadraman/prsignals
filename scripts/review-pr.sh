@@ -141,23 +141,25 @@ echo "Review:     $OUT/review.md"
 [ ! -f "$OUT/fix-brief.md" ] || echo "Fix brief:  $OUT/fix-brief.md"
 
 if [ "$POST" -eq 1 ]; then
-  INLINE_COUNT=0
-  if [ -s "$OUT/review-payload.json" ]; then
-    INLINE_COUNT="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync(process.argv[1], "utf8")).comments.length)' "$OUT/review-payload.json")"
-  fi
-  # Prefer a single PR review (overview + inline threads). Fall back to a summary
-  # issue comment when there are no inline findings, or if create-review fails.
-  if [ "$INLINE_COUNT" -gt 0 ]; then
-    echo "Posting PR review with $INLINE_COUNT inline comment(s)..."
-    if gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$OUT/review-payload.json" >/dev/null; then
-      echo "Posted PR review with inline finding comments."
-    else
-      echo "::warning::Inline review failed; posting summary comment only."
-      gh pr comment "$PR" ${GH_REPO[@]+"${GH_REPO[@]}"} --body-file "$OUT/review.md" >/dev/null
-    fi
+  [ -s "$OUT/review-payload.json" ] || die "review-payload.json is missing; cannot post"
+  INLINE_COUNT="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync(process.argv[1], "utf8")).comments.length)' "$OUT/review-payload.json")"
+  # Always post the gated payload (never the ungated review.md dump). Prefer a
+  # PR review; if create-review fails, post the payload body (+ inline text).
+  echo "Posting gated PR review ($INLINE_COUNT inline comment(s))..."
+  if gh api --method POST "repos/$REPO/pulls/$PR/reviews" --input "$OUT/review-payload.json" >/dev/null; then
+    echo "Posted PR review."
   else
-    echo "No inline findings; posting summary comment only..."
-    gh pr comment "$PR" ${GH_REPO[@]+"${GH_REPO[@]}"} --body-file "$OUT/review.md" >/dev/null
+    echo "create-review failed; posting gated payload as an issue comment..."
+    node --input-type=module -e '
+      import { readFileSync, writeFileSync } from "node:fs";
+      const payload = JSON.parse(readFileSync(process.argv[1], "utf8"));
+      const parts = [payload.body.trimEnd()];
+      for (const c of payload.comments || []) {
+        parts.push("", "---", "", `**\`${c.path}:${c.line}\`**`, "", c.body);
+      }
+      writeFileSync(process.argv[2], parts.join("\n") + "\n");
+    ' "$OUT/review-payload.json" "$OUT/comment.md"
+    gh pr comment "$PR" ${GH_REPO[@]+"${GH_REPO[@]}"} --body-file "$OUT/comment.md" >/dev/null
   fi
   echo "Posted the review to $URL"
 else

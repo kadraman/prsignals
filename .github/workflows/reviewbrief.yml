@@ -1,4 +1,5 @@
 # Self-review: runs this repo's composite action against its own PRs.
+# synchronize reviews only the new commits when github.event.before is available.
 #
 # Expects Settings > Secrets and variables > Actions:
 #   Secret    LLM_API_KEY
