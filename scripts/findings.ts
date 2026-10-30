@@ -89,10 +89,34 @@ function toText(value: unknown): string | undefined {
 }
 
 export function normalizeFinding(row: Record<string, unknown>, index: number): Finding | null {
-  const category = typeof row.category === "string" ? row.category.toLowerCase() : "";
-  const severity = typeof row.severity === "string" ? row.severity.toLowerCase() : "";
-  const file = toText(row.file), title = toText(row.title), description = toText(row.description), line = toInt(row.line);
-  if (!CATEGORIES.has(category) || !SEVERITIES.has(severity) || !file || !title || !description || !line || line < 1) return null;
+  return findingRejectReason(row) ? null : normalizeFindingUnchecked(row, index);
+}
+
+/** Why a raw finding row fails the schema, or null if it would normalize. */
+export function findingRejectReason(row: unknown): string | null {
+  if (typeof row !== "object" || row === null || Array.isArray(row)) return "not a JSON object";
+  const r = row as Record<string, unknown>;
+  const category = typeof r.category === "string" ? r.category.toLowerCase() : "";
+  if (!CATEGORIES.has(category)) {
+    return `category must be one of ${[...CATEGORIES].join("|")} (got ${JSON.stringify(r.category)})`;
+  }
+  const severity = typeof r.severity === "string" ? r.severity.toLowerCase() : "";
+  if (!SEVERITIES.has(severity)) {
+    return `severity must be one of ${[...SEVERITIES].join("|")} (got ${JSON.stringify(r.severity)})`;
+  }
+  if (!toText(r.file)) return "file is required";
+  if (!toText(r.title)) return "title is required";
+  if (!toText(r.description)) return "description is required";
+  const line = toInt(r.line);
+  if (!line || line < 1) return `line must be a positive integer (got ${JSON.stringify(r.line)})`;
+  return null;
+}
+
+function normalizeFindingUnchecked(row: Record<string, unknown>, index: number): Finding {
+  const category = (row.category as string).toLowerCase();
+  const severity = (row.severity as string).toLowerCase();
+  const file = toText(row.file) as string, title = toText(row.title) as string;
+  const description = toText(row.description) as string, line = toInt(row.line) as number;
   const endLine = toInt(row.endLine);
   const level = toLevel(row.confidence);
   const evidence = toText(row.evidence)?.slice(0, 1000);
@@ -108,7 +132,12 @@ export function normalizeFinding(row: Record<string, unknown>, index: number): F
   };
 }
 
-export interface ParseResult { ok: boolean; findings: Finding[]; dropped: number }
+export interface RejectedFinding { index: number; reason: string; row: unknown }
+export interface ParseResult {
+  ok: boolean; findings: Finding[]; dropped: number; rejected: RejectedFinding[];
+}
+
+const emptyParse = (): ParseResult => ({ ok: false, findings: [], dropped: 0, rejected: [] });
 
 /** ok=false: the reply was not usable JSON. ok=true with no findings: a valid "nothing found". */
 export function parseResponse(response: string): ParseResult {
@@ -116,19 +145,40 @@ export function parseResponse(response: string): ParseResult {
   let data: unknown;
   try { data = JSON.parse(text); } catch {
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return { ok: false, findings: [], dropped: 0 };
-    try { data = JSON.parse(match[0]); } catch { return { ok: false, findings: [], dropped: 0 }; }
+    if (!match) return emptyParse();
+    try { data = JSON.parse(match[0]); } catch { return emptyParse(); }
   }
   const rows = Array.isArray(data) ? data
     : typeof data === "object" && data !== null ? (data as Record<string, unknown>).findings : undefined;
-  if (!Array.isArray(rows)) return { ok: false, findings: [], dropped: 0 };
+  if (!Array.isArray(rows)) return emptyParse();
   const findings: Finding[] = [];
+  const rejected: RejectedFinding[] = [];
   rows.forEach((row, index) => {
-    const finding = typeof row === "object" && row !== null && !Array.isArray(row)
-      ? normalizeFinding(row as Record<string, unknown>, index) : null;
-    if (finding) findings.push(finding);
+    const reason = findingRejectReason(row);
+    if (reason) { rejected.push({ index, reason, row }); return; }
+    findings.push(normalizeFindingUnchecked(row as Record<string, unknown>, index));
   });
-  return { ok: true, findings, dropped: rows.length - findings.length };
+  return { ok: true, findings, dropped: rejected.length, rejected };
+}
+
+/** Prompt fragment asking the model to correct rejected finding rows only. */
+export function repairFindingsPrompt(rejected: RejectedFinding[]): string {
+  const items = rejected.map((item, i) => {
+    let serialized: string;
+    try { serialized = JSON.stringify(item.row); }
+    catch { serialized = "[unserializable]"; }
+    if (serialized.length > 800) serialized = `${serialized.slice(0, 797)}...`;
+    return `${i + 1}. reason: ${item.reason}\n   item: ${serialized}`;
+  }).join("\n");
+  return [
+    "",
+    "Your previous reply included findings that failed validation. Do NOT resend the findings that were already accepted.",
+    "Reply with ONLY a JSON object {\"findings\":[...]} containing corrected versions of the rejected items below, or {\"findings\":[]} if they were not real findings.",
+    "Each corrected item must include: category (security|quality|maintainability|performance|architecture|testing|documentation|compliance), severity (critical|high|medium|low|info), confidence (\"high\"|\"medium\"|\"low\"), file, line (positive integer), title, description, evidence.",
+    "",
+    "Rejected items:",
+    items,
+  ].join("\n");
 }
 
 export function parseFindings(response: string): Finding[] { return parseResponse(response).findings; }
@@ -214,12 +264,41 @@ function findingBullet(finding: Finding): string {
   return `- ${icon} **${title}** (\`${finding.file}:${range}\`)`;
 }
 
+/** Title, location, description, and recommendation for overview-only (non-inline) findings. */
+function summaryFindingBullet(finding: Finding): string {
+  const icon = icons[finding.severity];
+  const range = Number.isInteger(finding.endLine) && (finding.endLine as number) > finding.line
+    ? `${finding.line}-${finding.endLine}` : `${finding.line}`;
+  const title = finding.title.replace(/\s+/g, " ").trim();
+  const description = finding.description.replace(/\s+/g, " ").trim();
+  const recommendation = finding.recommendation?.replace(/\s+/g, " ").trim();
+  const lines = [
+    `- ${icon} **${title}** (\`${finding.file}:${range}\`)`,
+    `  ${description}`,
+  ];
+  if (recommendation) lines.push(`  **Recommendation:** ${recommendation}`);
+  return lines.join("\n");
+}
+
+export interface OverviewSections {
+  unanchored?: Finding[];
+  capped?: Finding[];
+}
+
+/** Whether the payload has anything worth posting (inline comments or gated summary sections). */
+export function payloadHasContent(payload: GitHubReviewPayload): boolean {
+  if (payload.comments.length > 0) return true;
+  return /### Could not place inline|### Over the inline cap/.test(payload.body);
+}
+
 /** Build the create-review overview body shown above the inline comment threads. */
 export function reviewOverviewBody(
   inline: Finding[],
   minimumConfidence: number,
-  leftovers: Finding[] = [],
+  sections: OverviewSections = {},
 ): string {
+  const unanchored = sections.unanchored ?? [];
+  const capped = sections.capped ?? [];
   const parts = ["## ReviewBrief", ""];
   if (!inline.length) {
     parts.push(
@@ -245,13 +324,24 @@ export function reviewOverviewBody(
       "",
     );
   }
-  if (leftovers.length) {
+  if (unanchored.length) {
     parts.push(
-      "### Also noted (not inline)",
+      "### Could not place inline",
       "",
-      ...leftovers.map(findingBullet),
+      "_Critical/high findings at or above the confidence floor whose line is not on the reviewed diff._",
       "",
-      "_Below the inline severity/confidence gate, not anchorable on the diff, or beyond the inline comment cap._",
+      ...unanchored.map(summaryFindingBullet),
+      "",
+    );
+  }
+  if (capped.length) {
+    parts.push(
+      "### Over the inline cap",
+      "",
+      "_Critical/high findings at or above the confidence floor that exceeded `max-inline-comments`._",
+      "",
+      ...capped.map(summaryFindingBullet),
+      "",
     );
   }
   return parts.join("\n").trimEnd() + "\n";
@@ -277,7 +367,7 @@ export function rankFindings(findings: Finding[]): Finding[] {
 /**
  * Whether a scored finding is eligible for an inline GitHub review comment.
  * Calibrated against beatbax: only critical/high above the confidence floor post inline;
- * medium/low/info stay in the overview "Also noted" section (medium@0.9 still flooded FPs).
+ * medium/low/info stay off the PR (they remain in findings.json / the job summary).
  */
 export function qualifiesForInline(finding: Finding, minimumConfidence: number): boolean {
   if (finding.confidence < minimumConfidence) return false;
@@ -297,6 +387,47 @@ export function partitionInline(
   };
 }
 
+/** Findings that clear the publish gate: inline threads plus gated overview sections. */
+export function publishableFindings(
+  anchored: Finding[],
+  unanchored: Finding[],
+  minimumConfidence: number,
+  maxComments: number,
+): { inline: Finding[]; unanchored: Finding[]; capped: Finding[]; all: Finding[] } {
+  const { inline, capped } = partitionInline(anchored, minimumConfidence, maxComments);
+  const gatedUnanchored = rankFindings(unanchored.filter((finding) => qualifiesForInline(finding, minimumConfidence)));
+  return { inline, unanchored: gatedUnanchored, capped, all: [...inline, ...gatedUnanchored, ...capped] };
+}
+
+/** Default confidence floor for medium findings in the fix brief (PR gate stays stricter). */
+export const FIX_BRIEF_MEDIUM_CONFIDENCE = 0.75;
+
+/**
+ * Whether a scored finding belongs in fix-brief.md.
+ * Always includes the PR publish set (critical/high ≥ minimumConfidence).
+ * Also includes medium severity at or above fixBriefMediumConfidence (default 0.75).
+ * Low/info stay out of the brief (job summary / findings.json only).
+ */
+export function qualifiesForFixBrief(
+  finding: Finding,
+  minimumConfidence: number,
+  fixBriefMediumConfidence = FIX_BRIEF_MEDIUM_CONFIDENCE,
+): boolean {
+  if (qualifiesForInline(finding, minimumConfidence)) return true;
+  if (finding.severity !== "medium") return false;
+  return finding.confidence >= fixBriefMediumConfidence;
+}
+
+/** Ranked findings that should drive the AI fix brief. */
+export function fixBriefFindings(
+  findings: Finding[],
+  minimumConfidence: number,
+  fixBriefMediumConfidence = FIX_BRIEF_MEDIUM_CONFIDENCE,
+): Finding[] {
+  return rankFindings(findings.filter((finding) =>
+    qualifiesForFixBrief(finding, minimumConfidence, fixBriefMediumConfidence)));
+}
+
 /** Filter, deduplicate, rank, and build the GitHub create-review payload. */
 export function githubReviewPayload(
   anchored: Finding[],
@@ -305,12 +436,14 @@ export function githubReviewPayload(
   render: (finding: Finding) => string = renderFinding,
   unanchored: Finding[] = [],
 ): GitHubReviewPayload {
-  const { inline, belowConfidence, capped } = partitionInline(anchored, minimumConfidence, maxComments);
-  const leftovers = [...unanchored, ...belowConfidence, ...capped];
+  const published = publishableFindings(anchored, unanchored, minimumConfidence, maxComments);
   return {
     event: "COMMENT",
-    body: reviewOverviewBody(inline, minimumConfidence, leftovers),
-    comments: inline.map((finding) => toReviewComment(finding, render(finding))),
+    body: reviewOverviewBody(published.inline, minimumConfidence, {
+      unanchored: published.unanchored,
+      capped: published.capped,
+    }),
+    comments: published.inline.map((finding) => toReviewComment(finding, render(finding))),
   };
 }
 

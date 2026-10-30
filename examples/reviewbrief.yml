@@ -5,6 +5,10 @@
 #   Variable  LLM_MODEL      model name (required)
 #   Variable  LLM_PROVIDER   "openai" (default) or "anthropic"
 #   Variable  LLM_BASE_URL   optional API root override
+#
+# On opened/reopened the action reviews the full PR. On synchronize it reviews
+# only the new commits (before...HEAD) when that SHA is available; if nothing
+# meets the publish gate, it stays silent so the earlier review remains.
 
 name: reviewbrief
 
@@ -26,6 +30,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # full history, so large diffs aren't limited by GitHub's API
+                           # and synchronize can resolve github.event.before
 
       - uses: kadraman/reviewbrief@v1   # or "./" when testing inside this repo
         with:

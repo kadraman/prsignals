@@ -2,7 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseDiffLines, resolvePath } from "./difflines.ts";
 import { clusterRuns, scoreFinding, verifyEvidence } from "./confidence.ts";
-import { parseResponse, partitionInline, qualifiesForInline, rankFindings } from "./findings.ts";
+import {
+  fixBriefFindings, parseResponse, partitionInline, qualifiesForFixBrief, qualifiesForInline, rankFindings,
+} from "./findings.ts";
 import { packBatches, splitBatchForRetry, splitDiff } from "./reviewbrief.ts";
 
 const DIFF = [
@@ -99,6 +101,23 @@ test("qualifiesForInline: only critical/high above confidence floor; medium/low/
   ] as any, 0.85, 0);
   assert.deepEqual(gated.inline.map((s) => s.line), [2, 1]);
   assert.deepEqual(gated.belowConfidence.map((s) => s.line).sort((a, b) => a - b), [3, 4]);
+});
+
+test("fix brief includes PR-gated findings plus medium at ≥ 0.75; skips low/info", () => {
+  const mk = (o: any) => ({ id: "S", category: "quality", severity: "high", confidence: 0.85, file: "a.py", line: 1, title: "t", description: "d", ...o });
+  assert.equal(qualifiesForFixBrief(mk({}) as any, 0.85), true);
+  assert.equal(qualifiesForFixBrief(mk({ severity: "medium", confidence: 0.75, title: "m" }) as any, 0.85), true);
+  assert.equal(qualifiesForFixBrief(mk({ severity: "medium", confidence: 0.74, title: "m-low" }) as any, 0.85), false);
+  assert.equal(qualifiesForFixBrief(mk({ severity: "low", confidence: 0.99, title: "low" }) as any, 0.85), false);
+  assert.equal(qualifiesForFixBrief(mk({ severity: "info", confidence: 0.99, title: "info" }) as any, 0.85), false);
+  assert.equal(qualifiesForFixBrief(mk({ severity: "high", confidence: 0.84, title: "hi-low" }) as any, 0.85), false);
+  const brief = fixBriefFindings([
+    mk({ line: 1, severity: "high", confidence: 0.9, title: "keep-high" }),
+    mk({ line: 2, severity: "medium", confidence: 0.75, title: "keep-med" }),
+    mk({ line: 3, severity: "medium", confidence: 0.74, title: "drop-med" }),
+    mk({ line: 4, severity: "low", confidence: 0.9, title: "drop-low" }),
+  ] as any, 0.85);
+  assert.deepEqual(brief.map((s) => s.title), ["keep-high", "keep-med"]);
 });
 
 test("splitDiff force-splits files above piece-chars even when under batch-chars", () => {

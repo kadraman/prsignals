@@ -158,3 +158,25 @@ test("e2e: a diff with only skipped files still writes an empty findings.json", 
     assert.deepEqual(readFindings(out).findings, []);
   });
 });
+
+test("e2e: malformed findings trigger one repair pass and recover corrected items", async () => {
+  const valid = finding({ title: "kept" });
+  const bad = { ...finding({ title: "broken" }), category: "bug" };
+  const fixed = finding({ id: "S2", title: "broken", category: "quality" });
+  await scenario(DIFF, (call, body) => {
+    const user = body.messages?.find((m) => m.role === "user")?.content ?? "";
+    if (call === 1) return { status: 200, content: findingsJson(valid, bad) };
+    assert.match(user, /Rejected items/);
+    assert.match(user, /category must be one of/);
+    assert.match(user, /Do NOT resend the findings that were already accepted/);
+    return { status: 200, content: findingsJson(fixed) };
+  }, {}, (r, out, seen) => {
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(seen.length, 2);
+    assert.match(r.stderr, /malformed finding\(s\); requesting repair/);
+    assert.match(r.stdout, /repair recovered 1 finding/);
+    const file = readFindings(out);
+    assert.equal(file.dropped, 0);
+    assert.deepEqual(file.findings.map((s: any) => s.title).sort(), ["broken", "kept"]);
+  });
+});

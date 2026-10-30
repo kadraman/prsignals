@@ -50,7 +50,7 @@ inputs:
     required: false
     default: "3"
   minimum-confidence:
-    description: Confidence floor for inline comments (0..1). Inline also requires severity critical or high (medium/low/info are overview-only).
+    description: Confidence floor for published findings (0..1). Only severity critical or high at or above this floor appear on the PR (medium/low/info stay in the job summary).
     required: false
     default: "0.85"
   max-inline-comments:
@@ -89,6 +89,8 @@ runs:
       env:
         BASE_REF: ${{ github.base_ref }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_ACTION: ${{ github.event.action }}
+        BEFORE_SHA: ${{ github.event.before }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
@@ -99,9 +101,26 @@ runs:
           exit 1
         fi
         git fetch --no-tags --quiet origin "$BASE_REF" 2>/dev/null || true
-        if ! git diff --no-color "origin/${BASE_REF}...HEAD" > "$out/pr.diff" 2>/dev/null; then
+        REVIEW_SCOPE="Reviewed the full pull request diff against origin/${BASE_REF}."
+        DIFF_RANGE="origin/${BASE_REF}...HEAD"
+        # On synchronize, review only commits since the previous head when that SHA is present.
+        ZERO_SHA="0000000000000000000000000000000000000000"
+        if [ "${PR_ACTION:-}" = "synchronize" ] && [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "$ZERO_SHA" ]; then
+          if git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            DIFF_RANGE="${BEFORE_SHA}...HEAD"
+            SHORT="$(git rev-parse --short "$BEFORE_SHA")"
+            REVIEW_SCOPE="Reviewed changes since ${SHORT} (incremental push), not the full pull request."
+            echo "Incremental review: $DIFF_RANGE"
+          else
+            echo "Before SHA $BEFORE_SHA is not in the checkout; reviewing the full PR diff."
+          fi
+        fi
+        printf '%s\n' "$REVIEW_SCOPE" > "$out/review-scope.txt"
+        if ! git diff --no-color "$DIFF_RANGE" > "$out/pr.diff" 2>/dev/null; then
           echo "git diff failed (shallow checkout?); falling back to 'gh pr diff'."
           echo "Tip: use actions/checkout with fetch-depth: 0 to avoid GitHub's API diff limits."
+          REVIEW_SCOPE="Reviewed the full pull request diff (gh pr diff fallback)."
+          printf '%s\n' "$REVIEW_SCOPE" > "$out/review-scope.txt"
           gh pr diff "$PR_NUMBER" > "$out/pr.diff"
         fi
 
@@ -138,6 +157,9 @@ runs:
       run: |
         set -euo pipefail
         out="$RUNNER_TEMP/reviewbrief"
+        if [ -f "$out/review-scope.txt" ]; then
+          export REVIEW_SCOPE="$(cat "$out/review-scope.txt")"
+        fi
         node --experimental-strip-types "$ACTION_PATH/scripts/reviewbrief.ts" --diff "$out/pr.diff" --out-dir "$out"
         echo "review_path=$out/review.md" >> "$GITHUB_OUTPUT"
         if [ -f "$out/fix-brief.md" ]; then
@@ -161,17 +183,13 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
-        REVIEW: ${{ steps.review.outputs.review_path }}
+        PR_ACTION: ${{ github.event.action }}
         REVIEW_PAYLOAD: ${{ steps.review.outputs.review_payload_path }}
         BRIEF_URL: ${{ steps.upload.outputs.artifact-url }}
         REPO: ${{ github.repository }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
-        append_brief_to_review() {
-          if [ -n "${BRIEF_URL:-}" ]; then
-            printf '\n\n**Fix brief for an AI assistant:** [download fix-brief.md](%s)\n' "$BRIEF_URL" >> "$REVIEW"
-          fi
-        }
         append_brief_to_payload() {
           if [ -n "${BRIEF_URL:-}" ]; then
             node --input-type=module -e '
@@ -183,23 +201,54 @@ runs:
             ' "$REVIEW_PAYLOAD" "$BRIEF_URL"
           fi
         }
-        INLINE_COUNT=0
-        if [ -s "$REVIEW_PAYLOAD" ]; then
-          INLINE_COUNT="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync(process.argv[1], "utf8")).comments.length)' "$REVIEW_PAYLOAD")"
-        fi
-        # Prefer a single PR review (overview + inline threads). Fall back to a summary
-        # issue comment when there are no inline findings, or if create-review fails.
-        if [ "$INLINE_COUNT" -gt 0 ]; then
-          append_brief_to_payload
-          if gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input "$REVIEW_PAYLOAD"; then
-            echo "Posted PR review with $INLINE_COUNT inline comment(s)."
-          else
-            echo "::warning::Inline review failed; posting summary comment only."
-            append_brief_to_review
-            gh pr comment "$PR_NUMBER" --body-file "$REVIEW"
+        # Decide whether the gated payload has anything worth posting.
+        HAS_CONTENT="$(node --input-type=module -e '
+          import { readFileSync } from "node:fs";
+          const payload = JSON.parse(readFileSync(process.argv[1], "utf8"));
+          const has = payload.comments.length > 0
+            || /### Could not place inline|### Over the inline cap/.test(payload.body || "");
+          console.log(has ? "yes" : "no");
+        ' "$REVIEW_PAYLOAD")"
+        INLINE_COUNT="$(node --input-type=module -e '
+          import { readFileSync } from "node:fs";
+          console.log(JSON.parse(readFileSync(process.argv[1], "utf8")).comments.length);
+        ' "$REVIEW_PAYLOAD")"
+        if [ "$HAS_CONTENT" != "yes" ]; then
+          if [ "${PR_ACTION:-}" = "synchronize" ]; then
+            echo "Nothing met the publish gate on this push; leaving the earlier review in place."
+            exit 0
           fi
+          append_brief_to_payload
+          # opened / reopened: post the gated overview so the first run is visible.
+          if gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input "$REVIEW_PAYLOAD"; then
+            echo "Posted empty-gate PR review (no inline findings)."
+          else
+            node --input-type=module -e '
+              import { readFileSync, writeFileSync } from "node:fs";
+              const payload = JSON.parse(readFileSync(process.argv[1], "utf8"));
+              writeFileSync(process.argv[2], payload.body);
+            ' "$REVIEW_PAYLOAD" "$RUNNER_TEMP/reviewbrief/comment.md"
+            gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/reviewbrief/comment.md"
+            echo "Posted empty-gate summary comment."
+          fi
+          exit 0
+        fi
+        append_brief_to_payload
+        # Prefer a single PR review (overview + inline threads). Fall back to the
+        # gated payload body (never review.md) if create-review fails.
+        if gh api --method POST "repos/$REPO/pulls/$PR_NUMBER/reviews" --input "$REVIEW_PAYLOAD"; then
+          echo "Posted PR review with $INLINE_COUNT inline comment(s)."
         else
-          append_brief_to_review
-          gh pr comment "$PR_NUMBER" --body-file "$REVIEW"
-          echo "No inline findings; posted summary comment only."
+          echo "::warning::create-review failed; posting gated payload as an issue comment."
+          node --input-type=module -e '
+            import { readFileSync, writeFileSync } from "node:fs";
+            const payload = JSON.parse(readFileSync(process.argv[1], "utf8"));
+            const parts = [payload.body.trimEnd()];
+            for (const c of payload.comments || []) {
+              parts.push("", `---`, "", `**\`${c.path}:${c.line}\`**`, "", c.body);
+            }
+            writeFileSync(process.argv[2], parts.join("\n") + "\n");
+          ' "$REVIEW_PAYLOAD" "$RUNNER_TEMP/reviewbrief/comment.md"
+          gh pr comment "$PR_NUMBER" --body-file "$RUNNER_TEMP/reviewbrief/comment.md"
+          echo "Posted gated summary comment with $INLINE_COUNT finding(s)."
         fi

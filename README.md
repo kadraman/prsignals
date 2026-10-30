@@ -105,10 +105,10 @@ Model names change often. Check your provider's docs for the current ones.
 | `batch-chars` | `100000` | max diff characters packed per API call (~25k tokens); lower it for small-context models |
 | `piece-chars` | `20000` | max characters per file piece before hunk-splitting; large files are split even when under `batch-chars` |
 | `max-batches` | `40` | cost guard; extra batches are listed as "not reviewed" |
-| `minimum-confidence` | `0.85` | confidence floor for inline comments; inline also requires severity `critical` or `high` (`medium`/`low`/`info` stay overview-only) |
-| `max-inline-comments` | `0` (all) | optional cap on inline comments; `0` means no cap |
+| `minimum-confidence` | `0.85` | confidence floor for published findings; only severity `critical` or `high` at or above this floor appear on the PR (`medium`/`low`/`info` stay in the job summary / `findings.json`) |
+| `max-inline-comments` | `0` (all) | optional cap on inline comments; `0` means no cap; overflow still appears in the overview under “Over the inline cap” |
 | `workers` | `3` | parallel API calls |
-| `fix-brief` | `true` | also produce `fix-brief.md` |
+| `fix-brief` | `true` | also produce `fix-brief.md` (PR-gated findings plus medium severity at ≥ `0.75`; override with env `FIX_BRIEF_MEDIUM_CONFIDENCE`) |
 | `post-comment` | `true` | post the review as a PR comment |
 | `github-token` | `github.token` | needs `pull-requests: write` |
 
@@ -134,9 +134,16 @@ or paste/attach it in Copilot, Cursor, or a chat session. The brief tells the as
 2. A file larger than `piece-chars` (capped by `batch-chars`) is split on hunk boundaries (and on line boundaries inside giant hunks); every part keeps the file header. Split parts are reviewed alone so they are not packed back into one oversized call.
 3. Other pieces are packed into batches up to `batch-chars`.
 4. Each batch is reviewed in its own call (retrying 429/5xx/529 with backoff). If the model still returns invalid JSON (or the request fails), the batch is split further and retried up to two times.
-5. Each response is parsed into the canonical Finding schema. Confidence is computed in code from the model's high/medium/low level plus checked evidence (and optional agreement across consistency runs). Inline comments are deduplicated with highest confidence winning, then gated to severity `critical`/`high` above `minimum-confidence` (medium and below are overview-only) and ranked deterministically by severity, confidence, file, line, title, and category. The prompt asks the model to skip style, typing, and docs nits so fewer low-value findings are emitted.
+5. Each response is parsed into the canonical Finding schema. Confidence is computed in code from the model's high/medium/low level plus checked evidence (and optional agreement across consistency runs). Findings are deduplicated with highest confidence winning, then gated to severity `critical`/`high` at or above `minimum-confidence`. Only those findings are posted: as inline review comments when the line is on the diff, otherwise under “Could not place inline” / “Over the inline cap” in the overview. Medium and below stay off the PR (job summary / `findings.json`). The fix brief is wider: it includes the PR-gated set **plus** medium severity findings scored ≥ `0.75` (env `FIX_BRIEF_MEDIUM_CONFIDENCE`). Low/info stay out of the brief. The prompt asks the model to skip style, typing, and docs nits so fewer low-value findings are emitted.
 
-Limitations: batches are reviewed independently, so problems that span files in different batches can be missed. Cost scales with PR size; `max-batches` caps it. If **every** batch fails (bad key, wrong model name), the run fails instead of posting an error comment.
+### What gets posted, and when
+
+- **Opened / reopened:** ReviewBrief reviews the full PR diff (`origin/<base>...HEAD`) and posts a gated PR review (or a one-line empty-gate note when nothing qualifies).
+- **Synchronize (new commits):** it reviews only the new commits (`before...HEAD`) when that prior SHA is in the checkout. Force-push (missing/`0000…` before SHA) falls back to the full PR diff. If the incremental review finds nothing that meets the publish gate, **no new comment is posted**, so the earlier review stays in place.
+- The review footer names the range (`Reviewed changes since <sha>` vs the full PR) so a partial review is obvious.
+- `create-review` failures fall back to an issue comment built from the gated payload — never the ungated `review.md` dump.
+
+Limitations: batches are reviewed independently, so problems that span files in different batches can be missed. Cost scales with PR size; `max-batches` caps it. If **every** batch fails (bad key, wrong model name), the run fails instead of posting an error comment. Incremental synchronize reviews will not re-discover findings that only appear when the whole PR is reviewed together.
 
 ---
 
