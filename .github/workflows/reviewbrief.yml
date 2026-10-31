@@ -1,11 +1,12 @@
 # Self-review: runs this repo's composite action against its own PRs.
-# synchronize reviews only the new commits when github.event.before is available.
+# synchronize reviews only the new commits (before...PR head) when that SHA is
+# still an ancestor of the new head; otherwise it reviews the full PR.
 #
 # Expects Settings > Secrets and variables > Actions:
 #   Secret    LLM_API_KEY
-#   Variable  LLM_MODEL      (required)
+#   Variable  LLM_MODEL      (required; recommended gpt-5-mini)
 #   Variable  LLM_PROVIDER   (optional; default openai)
-#   Variable  LLM_BASE_URL   (optional)
+#   Variable  LLM_BASE_URL   (optional; leave unset for OpenAI)
 # Optional Variables (passed through when set):
 #   LLM_MAX_OUTPUT_TOKENS, LLM_THINKING, LLM_REQUEST_TIMEOUT_MS
 

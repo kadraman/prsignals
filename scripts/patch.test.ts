@@ -2,8 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseDiffLines, annotateDiff, anchorFindings } from "./difflines.ts";
 import {
-  findingRejectReason, githubReviewPayload, parseResponse, renderFinding, repairFindingsPrompt,
-  reviewOverviewBody, toReviewComment,
+  applySeverityPolicy, findingRejectReason, githubReviewPayload, isTypingStyleNit, parseResponse,
+  renderFinding, repairFindingsPrompt, reviewOverviewBody, toReviewComment,
 } from "./findings.ts";
 
 const DIFF = [
@@ -82,6 +82,48 @@ test("findingRejectReason and repairFindingsPrompt describe schema failures", ()
   assert.match(prompt, /Do NOT resend the findings that were already accepted/);
 });
 
+test("applySeverityPolicy promotes removed dirty/unsaved-draft guards to high", () => {
+  const med = applySeverityPolicy(sig({
+    severity: "medium", confidence: 0.9, title: "Dirty-draft navigation guard removed",
+    description: "selectInstrument no longer prompts on unsaved draft changes.",
+  }) as any);
+  assert.equal(med.severity, "high");
+  const other = applySeverityPolicy(sig({
+    severity: "medium", title: "Loop listener may re-enter", description: "Idempotency concern.",
+  }) as any);
+  assert.equal(other.severity, "medium");
+  const parsed = parseResponse(JSON.stringify({
+    findings: [{
+      id: "1", category: "quality", severity: "medium", confidence: "high", file: "a.ts", line: 1,
+      title: "Dirty guard removed from instrument picker", description: "No longer checks unsaved draft.",
+      evidence: "setSelected(name)",
+    }],
+  }));
+  assert.equal(parsed.findings[0].severity, "high");
+});
+
+test("TypeScript any / type-assertion nits are rejected", () => {
+  assert.equal(isTypingStyleNit("Use of `any` for rawAst parameter", "Parameter is typed as any."), true);
+  assert.equal(isTypingStyleNit("Dirty draft guard removed", "Users can lose unsaved edits."), false);
+  assert.match(findingRejectReason({
+    category: "quality", severity: "medium", file: "a.ts", line: 1,
+    title: "Use of `any` for channels map", description: "channels is typed as any.",
+  }) ?? "", /typing\/style nit/);
+  const parsed = parseResponse(JSON.stringify({
+    findings: [
+      { id: "1", category: "quality", severity: "medium", confidence: "high", file: "a.ts", line: 1,
+        title: "Use of `any` for x", description: "typed as any", evidence: "const x: any = 1" },
+      { id: "2", category: "security", severity: "high", confidence: "high", file: "a.ts", line: 2,
+        title: "SQL injection", description: "user input in query", evidence: "db.query(user)" },
+    ],
+  }));
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.findings.length, 1);
+  assert.equal(parsed.findings[0].title, "SQL injection");
+  assert.equal(parsed.dropped, 1);
+  assert.match(parsed.rejected[0].reason, /typing\/style nit/);
+});
+
 test("CRLF diffs match LF line maps and annotate blank context", () => {
   const lf = [
     "diff --git a/a.py b/a.py", "--- a/a.py", "+++ b/a.py",
@@ -143,6 +185,8 @@ test("review overview body summarizes inline findings; below-gate stay off the P
   const empty = reviewOverviewBody([], 0.85);
   assert.match(empty, /No inline findings met the gate/);
   assert.doesNotMatch(empty, /Also noted/);
+  const emptyWithBelow = reviewOverviewBody([], 0.85, { belowGateCount: 3 });
+  assert.match(emptyWithBelow, /3 other findings were scored but stayed below the publish gate/);
   const body = reviewOverviewBody([
     sig({ severity: "high", title: "CRLF blank context", file: "scripts/difflines.ts", line: 34 }),
     sig({ severity: "critical", confidence: 0.95, title: "Fence length", file: "scripts/findings.ts", line: 128 }),

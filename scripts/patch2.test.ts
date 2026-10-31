@@ -121,7 +121,7 @@ test("fix brief includes PR-gated findings plus medium at ≥ 0.75; skips low/in
   assert.deepEqual(brief.map((s) => s.title), ["keep-high", "keep-med"]);
 });
 
-test("requireMultiRun: one-off findings stay off the PR and out of the fix brief", () => {
+test("requireMultiRun: one-off high still publishes; one-off medium stays out of the fix brief", () => {
   const mk = (o: any) => ({
     id: "S", category: "quality", severity: "high", confidence: 0.95, file: "a.py", line: 1, title: "t", description: "d",
     confidenceBreakdown: { level: "high", base: 0.75, anchor: "added", anchorDelta: 0.1, evidence: "found", evidenceDelta: 0.1, agreement: "all", agreementDelta: 0.1 },
@@ -129,7 +129,7 @@ test("requireMultiRun: one-off findings stay off the PR and out of the fix brief
   });
   const agreed = mk({ title: "agreed" });
   const once = mk({
-    title: "once", line: 2, confidenceBreakdown: {
+    title: "once", line: 2, confidence: 0.85, confidenceBreakdown: {
       level: "high", base: 0.75, anchor: "added", anchorDelta: 0.1, evidence: "found", evidenceDelta: 0.1,
       agreement: "single", agreementDelta: -0.1,
     },
@@ -147,15 +147,14 @@ test("requireMultiRun: one-off findings stay off the PR and out of the fix brief
     },
   });
   assert.equal(qualifiesForInline(agreed as any, 0.85, true), true);
-  assert.equal(qualifiesForInline(once as any, 0.85, true), false);
-  assert.equal(qualifiesForInline(once as any, 0.85, false), true);
-  assert.equal(qualifiesForFixBrief(once as any, 0.85, 0.75, true), false);
+  assert.equal(qualifiesForInline(once as any, 0.85, true), true); // high one-off still posts
+  assert.equal(qualifiesForFixBrief(once as any, 0.85, 0.75, true), true);
   assert.equal(qualifiesForFixBrief(medOnce as any, 0.85, 0.75, true), false);
   assert.equal(qualifiesForFixBrief(medAgreed as any, 0.85, 0.75, true), true);
   const published = publishableFindings([agreed, once] as any, [], 0.85, 0, true);
-  assert.deepEqual(published.inline.map((s) => s.title), ["agreed"]);
+  assert.deepEqual(published.inline.map((s) => s.title), ["agreed", "once"]);
   assert.deepEqual(fixBriefFindings([agreed, once, medOnce, medAgreed] as any, 0.85, 0.75, true).map((s) => s.title),
-    ["agreed", "med-agreed"]);
+    ["agreed", "once", "med-agreed"]);
 });
 
 test("splitDiff force-splits files above piece-chars even when under batch-chars", () => {

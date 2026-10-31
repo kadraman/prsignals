@@ -92,6 +92,31 @@ export function normalizeFinding(row: Record<string, unknown>, index: number): F
   return findingRejectReason(row) ? null : normalizeFindingUnchecked(row, index);
 }
 
+/** Promote under-rated UX/safety guard removals to high so they can clear the publish gate. */
+export function applySeverityPolicy(finding: Finding): Finding {
+  if (finding.severity === "critical" || finding.severity === "high") return finding;
+  const blob = `${finding.title}\n${finding.description}\n${finding.recommendation ?? ""}`;
+  if (/dirty[- ]?(draft|guard|navigation)|unsaved[- ]?(draft|changes)|no longer guards? unsaved|without (?:checking|prompting).*(?:dirty|unsaved)/i.test(blob)) {
+    return { ...finding, severity: "high" };
+  }
+  return finding;
+}
+
+/**
+ * True when the finding is a TypeScript typing/style nit (e.g. use of `any` or a type assertion)
+ * rather than a behavioural defect. These are banned by the review prompt and dropped in code.
+ */
+export function isTypingStyleNit(title: string, description: string, recommendation = ""): boolean {
+  const blob = `${title}\n${description}\n${recommendation}`;
+  if (/use of\s+[`'"]?any[`'"]?\b/i.test(blob)) return true;
+  if (/\b(?:typescript\s+)?[`'"]any[`'"]\b/i.test(blob) && !/\b(runtime|crash|null|undefin|leak|race|inject|secret)\b/i.test(blob)) {
+    return true;
+  }
+  if (/\btype assertions?\b/i.test(blob) && !/\b(runtime|crash|null|undefin|leak|race)\b/i.test(blob)) return true;
+  if (/^[^.]{0,80}\bas\s+any\b/i.test(title) || /\bas\s+any\b/i.test(title) && title.length < 80) return true;
+  return false;
+}
+
 /** Why a raw finding row fails the schema, or null if it would normalize. */
 export function findingRejectReason(row: unknown): string | null {
   if (typeof row !== "object" || row === null || Array.isArray(row)) return "not a JSON object";
@@ -109,6 +134,12 @@ export function findingRejectReason(row: unknown): string | null {
   if (!toText(r.description)) return "description is required";
   const line = toInt(r.line);
   if (!line || line < 1) return `line must be a positive integer (got ${JSON.stringify(r.line)})`;
+  const title = toText(r.title) as string;
+  const description = toText(r.description) as string;
+  const recommendation = toText(r.recommendation) ?? "";
+  if (isTypingStyleNit(title, description, recommendation)) {
+    return "typing/style nit (TypeScript any / type assertions are not reportable)";
+  }
   return null;
 }
 
@@ -156,7 +187,7 @@ export function parseResponse(response: string): ParseResult {
   rows.forEach((row, index) => {
     const reason = findingRejectReason(row);
     if (reason) { rejected.push({ index, reason, row }); return; }
-    findings.push(normalizeFindingUnchecked(row as Record<string, unknown>, index));
+    findings.push(applySeverityPolicy(normalizeFindingUnchecked(row as Record<string, unknown>, index)));
   });
   return { ok: true, findings, dropped: rejected.length, rejected };
 }
@@ -296,6 +327,8 @@ function summaryFindingBullet(finding: Finding): string {
 export interface OverviewSections {
   unanchored?: Finding[];
   capped?: Finding[];
+  /** Scored findings that did not meet the publish gate (severity/confidence). */
+  belowGateCount?: number;
 }
 
 /** Whether the payload has anything worth posting (inline comments or gated summary sections). */
@@ -312,12 +345,19 @@ export function reviewOverviewBody(
 ): string {
   const unanchored = sections.unanchored ?? [];
   const capped = sections.capped ?? [];
+  const belowGateCount = sections.belowGateCount ?? 0;
   const parts = ["## ReviewBrief", ""];
   if (!inline.length) {
     parts.push(
       `No inline findings met the gate (critical/high with confidence ≥ ${minimumConfidence}).`,
       "",
     );
+    if (belowGateCount > 0) {
+      parts.push(
+        `_${belowGateCount} other finding${belowGateCount === 1 ? " was" : "s were"} scored but stayed below the publish gate (see \`findings.json\` / the job summary)._`,
+        "",
+      );
+    }
   } else {
     const bySeverity = new Map<FindingSeverity, number>();
     for (const finding of inline) {
@@ -387,14 +427,15 @@ export function hasMultiRunAgreement(finding: Finding): boolean {
  * Whether a scored finding is eligible for an inline GitHub review comment.
  * Calibrated against beatbax: only critical/high above the confidence floor post inline;
  * medium/low/info stay off the PR (they remain in findings.json / the job summary).
- * When requireMultiRun is set (consistency runs with agreement scoring), one-off findings stay off the PR.
+ * Agreement across consistency runs adjusts the confidence score; it does not hide
+ * critical/high findings that already clear the floor (one-off highs still publish).
+ * `requireMultiRun` is accepted for call-site compatibility and is unused here.
  */
 export function qualifiesForInline(
-  finding: Finding, minimumConfidence: number, requireMultiRun = false,
+  finding: Finding, minimumConfidence: number, _requireMultiRun = false,
 ): boolean {
   if (finding.confidence < minimumConfidence) return false;
   if (finding.severity !== "critical" && finding.severity !== "high") return false;
-  if (requireMultiRun && !hasMultiRunAgreement(finding)) return false;
   return true;
 }
 
@@ -431,10 +472,10 @@ export const FIX_BRIEF_MEDIUM_CONFIDENCE = 0.75;
 
 /**
  * Whether a scored finding belongs in fix-brief.md.
- * Always includes the PR publish set (critical/high ≥ minimumConfidence).
+ * Always includes the PR publish set (critical/high ≥ minimumConfidence), including one-offs.
  * Also includes medium severity at or above fixBriefMediumConfidence (default 0.75).
  * Low/info stay out of the brief (job summary / findings.json only).
- * When requireMultiRun is set, one-off findings (agreement "single") stay out of the brief too.
+ * When requireMultiRun is set, one-off *medium* findings stay out of the brief.
  */
 export function qualifiesForFixBrief(
   finding: Finding,
@@ -442,9 +483,9 @@ export function qualifiesForFixBrief(
   fixBriefMediumConfidence = FIX_BRIEF_MEDIUM_CONFIDENCE,
   requireMultiRun = false,
 ): boolean {
-  if (requireMultiRun && !hasMultiRunAgreement(finding)) return false;
-  if (qualifiesForInline(finding, minimumConfidence, false)) return true;
+  if (qualifiesForInline(finding, minimumConfidence)) return true;
   if (finding.severity !== "medium") return false;
+  if (requireMultiRun && !hasMultiRunAgreement(finding)) return false;
   return finding.confidence >= fixBriefMediumConfidence;
 }
 
@@ -469,11 +510,13 @@ export function githubReviewPayload(
   requireMultiRun = false,
 ): GitHubReviewPayload {
   const published = publishableFindings(anchored, unanchored, minimumConfidence, maxComments, requireMultiRun);
+  const belowGateCount = Math.max(0, anchored.length + unanchored.length - published.all.length);
   return {
     event: "COMMENT",
     body: reviewOverviewBody(published.inline, minimumConfidence, {
       unanchored: published.unanchored,
       capped: published.capped,
+      belowGateCount,
     }),
     comments: published.inline.map((finding) => toReviewComment(finding, render(finding))),
   };

@@ -2,14 +2,17 @@
 #
 # Settings > Secrets and variables > Actions:
 #   Secret    LLM_API_KEY    your provider's API key
-#   Variable  LLM_MODEL      model name (required)
+#   Variable  LLM_MODEL      model name (required; recommended gpt-5-mini)
 #   Variable  LLM_PROVIDER   "openai" (default) or "anthropic"
-#   Variable  LLM_BASE_URL   optional API root override
+#   Variable  LLM_BASE_URL   leave unset for OpenAI; set for DeepSeek/OpenRouter/etc.
 #
-# On opened/reopened the action reviews the full PR. On synchronize it reviews
-# only the new commits (before...HEAD) when that SHA is available; if nothing
-# meets the publish gate, it stays silent so the earlier review remains.
-# Default consistency-runs is 2: only findings seen in multiple passes are published.
+# On opened/reopened the action reviews the full PR against the PR head SHA.
+# On synchronize it reviews only the new commits (before...PR head) when that
+# SHA is still an ancestor of the new head; if nothing meets the publish gate,
+# it stays silent so the earlier review remains. Inline comments are anchored
+# to GitHub's PR diff even when the model sees extra context lines.
+# Default consistency-runs is 2: agreement adjusts confidence; critical/high that
+# clear the floor still publish as one-offs.
 
 name: reviewbrief
 
