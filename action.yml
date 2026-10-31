@@ -26,9 +26,9 @@ inputs:
     required: false
     default: ""
   consistency-runs:
-    description: Independent review passes for agreement scoring (1-5). Extra runs use CONSISTENCY_TEMPERATURE.
+    description: Independent review passes for agreement scoring (1-5, default 2). Extra runs use CONSISTENCY_TEMPERATURE. When ≥2 and all batches succeed, only findings seen in multiple runs are published to the PR / fix brief.
     required: false
-    default: "1"
+    default: "2"
   max-output-tokens:
     description: Max output tokens per call (required by the Anthropic API).
     required: false

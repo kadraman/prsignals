@@ -53,7 +53,8 @@ function runReview(baseUrl: string, outDir: string, diffPath: string, extraEnv: 
     const child = spawn(process.execPath, ["--experimental-strip-types", SCRIPT, "--diff", diffPath, "--out-dir", outDir, "--no-fix-brief"], {
       env: {
         ...process.env, LLM_API_KEY: "test-key", LLM_MODEL: "mock-model", LLM_PROVIDER: "openai", LLM_BASE_URL: baseUrl,
-        LLM_RETRY_DELAY: "0", WORKERS: "1", FIX_BRIEF: "false", LLM_TEMPERATURE: "", CONSISTENCY_RUNS: "", ...extraEnv,
+        // Default engine consistency-runs is 2; keep unit e2e at 1 unless a test overrides.
+        LLM_RETRY_DELAY: "0", WORKERS: "1", FIX_BRIEF: "false", LLM_TEMPERATURE: "", CONSISTENCY_RUNS: "1", ...extraEnv,
       },
       windowsHide: true,
     });
@@ -106,14 +107,25 @@ test("e2e: invented evidence is penalised, verified evidence is rewarded, and ou
 test("e2e: two consistency runs reward agreement, penalise one-run findings, and vary only the temperature", async () => {
   const a = finding({ title: "A", confidence: "medium" });
   const b = finding({ id: "S2", title: "B", category: "quality", line: 4, confidence: "medium", evidence: "return True" });
-  await scenario(DIFF, (call) => ({ status: 200, content: call === 1 ? findingsJson(a, b) : findingsJson(a) }),
-    { CONSISTENCY_RUNS: "2" }, (r, out, seen) => {
+  const onceHigh = finding({ id: "S3", title: "Once", line: 2, evidence: "def run(cmd):" });
+  await scenario(DIFF, (call) => ({
+    status: 200,
+    content: call === 1 ? findingsJson(a, b, onceHigh) : findingsJson(a),
+  }), { CONSISTENCY_RUNS: "2" }, (r, out, seen) => {
       assert.equal(r.code, 0, r.stderr);
       const file = readFindings(out);
       assert.equal(file.runs, 2);
       assert.equal(file.agreementScoring, true);
+      assert.equal(file.requireMultiRun, true);
       assert.equal(file.findings.find((s: any) => s.title === "A").confidence, 0.85);
       assert.equal(file.findings.find((s: any) => s.title === "B").confidence, 0.65);
+      const once = file.findings.find((s: any) => s.title === "Once");
+      assert.equal(once.confidenceBreakdown.agreement, "single");
+      assert.equal(once.inline, false); // high but one-off: not published
+      assert.equal(file.findings.find((s: any) => s.title === "A").inline, true);
+      const payload = JSON.parse(readFileSync(join(out, "review-payload.json"), "utf8"));
+      assert.equal(payload.comments.length, 1);
+      assert.match(payload.comments[0].body, /\*\*A\*\*/);
       assert.deepEqual(seen.map((body) => body.temperature), [0, 0.4]);
     });
 });

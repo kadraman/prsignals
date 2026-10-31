@@ -9,6 +9,7 @@
 # On opened/reopened the action reviews the full PR. On synchronize it reviews
 # only the new commits (before...HEAD) when that SHA is available; if nothing
 # meets the publish gate, it stays silent so the earlier review remains.
+# Default consistency-runs is 2: only findings seen in multiple passes are published.
 
 name: reviewbrief
 

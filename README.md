@@ -37,7 +37,8 @@ scripts/review-pr.sh 123 --repo OWNER/NAME
 # Same, from a PR URL:
 scripts/review-pr.sh https://github.com/OWNER/NAME/pull/123
 
-# Post the result as a PR comment once you're happy with it:
+# Post the result as a PR review once you're happy with it.
+# If fix-brief.md was produced, it is uploaded as a secret gist and linked from the review:
 scripts/review-pr.sh 123 --repo OWNER/NAME --post
 
 # Try a different model without editing .env:
@@ -100,7 +101,7 @@ Model names change often. Check your provider's docs for the current ones.
 | `provider` | `openai` | `openai` or `anthropic` |
 | `base-url` | | API root override |
 | `temperature` | `0` | sampling temperature; set to `none` to omit the parameter (some models reject it) |
-| `consistency-runs` | `1` | independent review passes (1–5); later runs use `CONSISTENCY_TEMPERATURE` (default `0.4`) for agreement scoring |
+| `consistency-runs` | `2` | independent review passes (1–5); later runs use `CONSISTENCY_TEMPERATURE` (default `0.4`). When ≥2 and all batches succeed, only findings seen in multiple runs are published to the PR / fix brief (one-offs stay in the job summary) |
 | `max-output-tokens` | `8192` | required by the Anthropic API |
 | `batch-chars` | `100000` | max diff characters packed per API call (~25k tokens); lower it for small-context models |
 | `piece-chars` | `20000` | max characters per file piece before hunk-splitting; large files are split even when under `batch-chars` |
@@ -134,7 +135,7 @@ or paste/attach it in Copilot, Cursor, or a chat session. The brief tells the as
 2. A file larger than `piece-chars` (capped by `batch-chars`) is split on hunk boundaries (and on line boundaries inside giant hunks); every part keeps the file header. Split parts are reviewed alone so they are not packed back into one oversized call.
 3. Other pieces are packed into batches up to `batch-chars`.
 4. Each batch is reviewed in its own call (retrying 429/5xx/529 with backoff). If the model still returns invalid JSON (or the request fails), the batch is split further and retried up to two times.
-5. Each response is parsed into the canonical Finding schema. Confidence is computed in code from the model's high/medium/low level plus checked evidence (and optional agreement across consistency runs). Findings are deduplicated with highest confidence winning, then gated to severity `critical`/`high` at or above `minimum-confidence`. Only those findings are posted: as inline review comments when the line is on the diff, otherwise under “Could not place inline” / “Over the inline cap” in the overview. Medium and below stay off the PR (job summary / `findings.json`). The fix brief is wider: it includes the PR-gated set **plus** medium severity findings scored ≥ `0.75` (env `FIX_BRIEF_MEDIUM_CONFIDENCE`). Low/info stay out of the brief. The prompt asks the model to skip style, typing, and docs nits so fewer low-value findings are emitted.
+5. Each response is parsed into the canonical Finding schema. Confidence is computed in code from the model's high/medium/low level plus checked evidence (and agreement across consistency runs). By default the review runs twice (`consistency-runs: 2`); findings are clustered across runs, and **only multi-run findings** are published when agreement scoring is active. Findings are then gated to severity `critical`/`high` at or above `minimum-confidence`. Those are posted as inline review comments when the line is on the diff, otherwise under “Could not place inline” / “Over the inline cap”. Medium and below stay off the PR (job summary / `findings.json`). The fix brief includes the PR-gated set **plus** multi-run medium findings scored ≥ `0.75` (env `FIX_BRIEF_MEDIUM_CONFIDENCE`). Low/info and one-off findings stay out of the brief. The prompt asks the model to skip style, typing, and docs nits so fewer low-value findings are emitted.
 
 ### What gets posted, and when
 

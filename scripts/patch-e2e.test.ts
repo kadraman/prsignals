@@ -86,6 +86,7 @@ function runReview(baseUrl: string, outDir: string, diffPath: string): Promise<{
         MAX_BATCHES: "40",
         WORKERS: "1",
         FIX_BRIEF: "false",
+        CONSISTENCY_RUNS: "1",
       },
       windowsHide: true,
     });

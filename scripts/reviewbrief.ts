@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { annotateDiff, anchorFindings, parseDiffLines } from "./difflines.ts";
 import {
   FIX_BRIEF_MEDIUM_CONFIDENCE, fixBriefFindings, githubReviewPayload, parseResponse, partitionInline,
-  publishableFindings, rankFindings, renderFinding, repairFindingsPrompt, type Finding,
+  rankFindings, renderFinding, repairFindingsPrompt, type Finding,
 } from "./findings.ts";
 import { clusterRuns, scoreFinding } from "./confidence.ts";
 
@@ -35,7 +35,9 @@ Emit findings only for concrete, actionable defects with a real recommendation: 
 
 Do NOT emit findings for: style or readability; naming; variable shadowing; TypeScript \`any\` / type assertions; missing comments; docs wording; test brittleness or assertion tightness; speculative "might confuse" maintainability; CSS preferences; dead code that is merely unused; or findings whose conclusion is "no bug", "works as intended", "accept as designed", "no change", or "none".
 
-Evidence: every finding must include \`evidence\`, the exact text of the changed line(s) the finding is about, copied from the diff without the leading line number or +/- marker (separate several lines with \\n). Never paraphrase. If you cannot quote evidence, do not report the finding. A suggestion must contain replacement code only.
+Evidence: every finding must include \`evidence\`, the exact text of the changed line(s) the finding is about, copied from the diff without the leading line number or +/- marker (separate several lines with \\n). Never paraphrase. If you cannot quote evidence, do not report the finding.
+
+Suggestions and length: a \`suggestion\` must be replacement code only (no prose, no markdown fences). Prefer a few lines and keep it under ~300 characters so it fits in the inline GitHub comment. Keep \`title\` short; when including a suggestion, keep \`description\` + \`recommendation\` together under ~400 characters. If the correct fix needs a large rewrite, omit \`suggestion\` and put guidance in \`recommendation\` instead.
 
 In the diff, every added (+) and unchanged context line is prefixed with its line number in the new file; removed (-) lines have no number. Report \`line\` and \`endLine\` using only those numbers, and only for lines that carry one. A \`suggestion\` replaces exactly the lines \`line\` through \`endLine\` (or just \`line\` when there is no \`endLine\`).
 
@@ -324,7 +326,7 @@ function printPlan(
   pieces: Piece[], skipped: string[], batches: Piece[][], batchLimit: number, pieceLimit: number,
 ): void {
   console.log("Dry run: no API calls will be made.\n");
-  console.log(`batch size limit : ${batchLimit}\npiece size limit : ${pieceLimit}\ndiff pieces      : ${pieces.length}\nAPI calls needed : ${batches.length * Math.min(Math.max(envInt("CONSISTENCY_RUNS", 1), 1), 5)} review call(s) + 1 fix-brief call\n`);
+  console.log(`batch size limit : ${batchLimit}\npiece size limit : ${pieceLimit}\ndiff pieces      : ${pieces.length}\nAPI calls needed : ${batches.length * Math.min(Math.max(envInt("CONSISTENCY_RUNS", 2), 1), 5)} review call(s) + 1 fix-brief call\n`);
   batches.forEach((batch, index) => {
     const size = batch.reduce((sum, piece) => sum + piece.text.length, 0);
     console.log(`Batch ${index + 1} (${size} chars, ~${Math.floor(size / 4)} tokens)`);
@@ -406,8 +408,11 @@ async function main(): Promise<number> {
     env("LLM_BASE_URL", DEFAULT_BASE[provider]), env("LLM_TEMPERATURE", "0"),
     envInt("LLM_MAX_OUTPUT_TOKENS", 8192), Number(env("LLM_RETRY_DELAY", "3"))] };
   console.log(`${pieces.length} diff pieces -> ${batches.length} batch(es) [${provider}, ${model}]`);
-  const runCount = Math.min(Math.max(envInt("CONSISTENCY_RUNS", 1), 1), 5);
+  const runCount = Math.min(Math.max(envInt("CONSISTENCY_RUNS", 2), 1), 5);
   const consistencyTemperature = env("CONSISTENCY_TEMPERATURE", "0.4");
+  if (runCount > 1) {
+    console.log(`Consistency runs: ${runCount} (extra runs use temperature ${consistencyTemperature}); only multi-run findings are published.`);
+  }
   const runOutcomes: Outcome[][] = [];
   for (let run = 0; run < runCount; run++) {
     const runConfig = run === 0 ? config : withTemperature(config, consistencyTemperature);
@@ -439,8 +444,11 @@ async function main(): Promise<number> {
     : "No actionable findings found in the parts that were reviewed.";
   const final = findings.length ? rankFindings(findings).map(safeRender).join("\n\n") : nothingFound;
   const { anchored, unanchored } = anchorFindings(findings, lineMap);
-  const published = publishableFindings(anchored, unanchored, minimumConfidence, maxInlineComments);
-  const payload = githubReviewPayload(anchored, minimumConfidence, maxInlineComments, safeRender, unanchored);
+  // When agreement scoring is on, one-off findings stay off the PR and out of the fix brief.
+  const requireMultiRun = agreementOn;
+  const payload = githubReviewPayload(
+    anchored, minimumConfidence, maxInlineComments, safeRender, unanchored, requireMultiRun,
+  );
   const reviewScope = env("REVIEW_SCOPE");
   const footer = [`_Reviewed ${pieces.length} diff pieces in ${batches.length} API call(s) with \`${model}\` (${provider})._`];
   if (reviewScope) footer.push(`_${reviewScope}_`);
@@ -454,7 +462,9 @@ async function main(): Promise<number> {
   if (dropped) footer.push(`${dropped} malformed finding(s) were discarded.`);
   if (runCount > 1 && !agreementOn) footer.push("Consistency runs: a batch failed in at least one extra run, so agreement scoring was not applied.");
   const keyOf = (s: Finding) => `${s.file}\u0000${s.line}\u0000${s.title}`;
-  const inlineKeys = new Set(partitionInline(anchored, minimumConfidence, maxInlineComments).inline.map(keyOf));
+  const inlineKeys = new Set(
+    partitionInline(anchored, minimumConfidence, maxInlineComments, requireMultiRun).inline.map(keyOf),
+  );
   const records = [
     ...anchored.map((s) => ({ ...s, anchored: true, inline: inlineKeys.has(keyOf(s)) })),
     ...unanchored.map((s) => ({ ...s, anchored: false, inline: false })),
@@ -462,7 +472,7 @@ async function main(): Promise<number> {
   writeFileSync(join(args.outDir, "findings.json"), JSON.stringify({
     schemaVersion: 1, engineVersion: VERSION, repo: ctx.repo, pr: ctx.pr, provider, model, runs: runCount,
     temperature: env("LLM_TEMPERATURE", "0"), minimumConfidence, agreementScoring: agreementOn,
-    reviewScope: reviewScope || null,
+    requireMultiRun, reviewScope: reviewScope || null,
     failedBatches: failed.flatMap((o) => o.files), dropped, findings: records,
   }, null, 2));
   // Append the same footer to the gated PR payload so create-review shows scope/failures.
@@ -472,7 +482,7 @@ async function main(): Promise<number> {
   if (env("FIX_BRIEF", "true").toLowerCase() === "true" && !flags.has("--no-fix-brief")) {
     const fixBriefMediumConfidence = Number(env("FIX_BRIEF_MEDIUM_CONFIDENCE", String(FIX_BRIEF_MEDIUM_CONFIDENCE)));
     const forBriefFindings = fixBriefFindings(
-      [...anchored, ...unanchored], minimumConfidence, fixBriefMediumConfidence,
+      [...anchored, ...unanchored], minimumConfidence, fixBriefMediumConfidence, requireMultiRun,
     );
     const forBrief = forBriefFindings.length
       ? forBriefFindings.map(safeRender).join("\n\n")

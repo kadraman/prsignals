@@ -183,49 +183,62 @@ export function repairFindingsPrompt(rejected: RejectedFinding[]): string {
 
 export function parseFindings(response: string): Finding[] { return parseResponse(response).findings; }
 
-/** Render one concise, bounded GitHub review comment. */
+/** Render one concise, bounded GitHub review comment. Prefer keeping a GitHub suggestion by shrinking prose first. */
 export function renderFinding(finding: Finding, maxLength = 800): string {
-  const header = `${icons[finding.severity]} **${finding.category[0].toUpperCase()}${finding.category.slice(1)} Finding**`;
-  let title = finding.title.trim();
-  let description = finding.description.trim();
-  let recommendation = finding.recommendation?.trim() ?? "";
+  // Compact chrome so more of the budget goes to the suggestion / explanation.
+  const header = `${icons[finding.severity]} **${finding.category[0].toUpperCase()}${finding.category.slice(1)}**`;
+  const fullTitle = finding.title.trim();
+  const fullDescription = finding.description.trim();
+  const fullRecommendation = finding.recommendation?.trim() ?? "";
+  let title = fullTitle;
+  let description = fullDescription;
+  let recommendation = fullRecommendation;
   const suggestion = finding.suggestion?.trimEnd() ?? "";
   let suggestionNote = "";
-  const confidence = `Confidence: ${Math.round(finding.confidence * 100)}%`;
+  const confidence = `${Math.round(finding.confidence * 100)}% confidence`;
   const lineRange = Number.isInteger(finding.endLine) && (finding.endLine as number) >= finding.line
     ? `${finding.line}-${finding.endLine}` : `${finding.line}`;
-  const location = `**Location:** \`${finding.file.replace(/`/g, "\\`")}:${lineRange}\``;
+  const location = `\`${finding.file.replace(/`/g, "\\`")}:${lineRange}\``;
   const suggestionFence = fenceFor(suggestion);
 
   const compose = (includeSuggestion: boolean) => {
     const parts = [header, "", `**${title}**`, "", location, "", description];
-    if (recommendation) parts.push("", `**Recommendation:** ${recommendation}`);
+    if (recommendation) parts.push("", `**Fix:** ${recommendation}`);
     if (includeSuggestion && suggestion) parts.push("", `${suggestionFence}suggestion`, suggestion, suggestionFence);
     if (suggestionNote) parts.push("", suggestionNote);
     parts.push("", confidence);
     return parts.join("\n");
   };
 
+  const shrinkProse = (includeSuggestion: boolean): string => {
+    let body = compose(includeSuggestion);
+    while (body.length > maxLength) {
+      const excess = body.length - maxLength;
+      if (description.length) {
+        description = shorten(description, Math.max(0, description.length - excess - 1));
+      } else if (recommendation.length) {
+        recommendation = shorten(recommendation, Math.max(0, recommendation.length - excess - 1));
+      } else if (title.length) {
+        title = shorten(title, Math.max(0, title.length - excess - 1));
+      } else {
+        break;
+      }
+      body = compose(includeSuggestion);
+    }
+    return body;
+  };
+
   let includeSuggestion = Boolean(suggestion);
-  if (compose(includeSuggestion).length > maxLength && includeSuggestion) {
-    // An incomplete GitHub suggestion fence absorbs all following Markdown.
-    // Omit an oversized suggestion block instead of returning malformed Markdown.
+  let body = shrinkProse(includeSuggestion);
+  // Only drop the suggestion when it still cannot fit after prose is exhausted.
+  // Never truncate mid-fence — an incomplete suggestion block absorbs following Markdown.
+  if (body.length > maxLength && includeSuggestion) {
     includeSuggestion = false;
     suggestionNote = "**Suggestion omitted:** it exceeds the comment length limit.";
-  }
-  let body = compose(includeSuggestion);
-  while (body.length > maxLength) {
-    const excess = body.length - maxLength;
-    if (description.length) {
-      description = shorten(description, Math.max(0, description.length - excess - 1));
-    } else if (recommendation.length) {
-      recommendation = shorten(recommendation, Math.max(0, recommendation.length - excess - 1));
-    } else if (title.length) {
-      title = shorten(title, Math.max(0, title.length - excess - 1));
-    } else {
-      break;
-    }
-    body = compose(includeSuggestion);
+    title = fullTitle;
+    description = fullDescription;
+    recommendation = fullRecommendation;
+    body = shrinkProse(false);
   }
   return body.length <= maxLength ? body : `${body.slice(0, maxLength - 1)}…`;
 }
@@ -364,22 +377,33 @@ export function rankFindings(findings: Finding[]): Finding[] {
     || a.category.localeCompare(b.category));
 }
 
+/** True when consistency scoring says the finding appeared in more than one run. */
+export function hasMultiRunAgreement(finding: Finding): boolean {
+  const agreement = finding.confidenceBreakdown?.agreement;
+  return agreement === "all" || agreement === "partial";
+}
+
 /**
  * Whether a scored finding is eligible for an inline GitHub review comment.
  * Calibrated against beatbax: only critical/high above the confidence floor post inline;
  * medium/low/info stay off the PR (they remain in findings.json / the job summary).
+ * When requireMultiRun is set (consistency runs with agreement scoring), one-off findings stay off the PR.
  */
-export function qualifiesForInline(finding: Finding, minimumConfidence: number): boolean {
+export function qualifiesForInline(
+  finding: Finding, minimumConfidence: number, requireMultiRun = false,
+): boolean {
   if (finding.confidence < minimumConfidence) return false;
-  return finding.severity === "critical" || finding.severity === "high";
+  if (finding.severity !== "critical" && finding.severity !== "high") return false;
+  if (requireMultiRun && !hasMultiRunAgreement(finding)) return false;
+  return true;
 }
 
 /** Split anchored findings into inline comments, below-threshold leftovers, and cap overflow. */
 export function partitionInline(
-  anchored: Finding[], minimumConfidence: number, maxComments: number,
+  anchored: Finding[], minimumConfidence: number, maxComments: number, requireMultiRun = false,
 ): { inline: Finding[]; belowConfidence: Finding[]; capped: Finding[] } {
-  const belowConfidence = anchored.filter((finding) => !qualifiesForInline(finding, minimumConfidence));
-  const ordered = rankFindings(anchored.filter((finding) => qualifiesForInline(finding, minimumConfidence)));
+  const belowConfidence = anchored.filter((finding) => !qualifiesForInline(finding, minimumConfidence, requireMultiRun));
+  const ordered = rankFindings(anchored.filter((finding) => qualifiesForInline(finding, minimumConfidence, requireMultiRun)));
   return {
     inline: maxComments > 0 ? ordered.slice(0, maxComments) : ordered,
     belowConfidence,
@@ -393,9 +417,12 @@ export function publishableFindings(
   unanchored: Finding[],
   minimumConfidence: number,
   maxComments: number,
+  requireMultiRun = false,
 ): { inline: Finding[]; unanchored: Finding[]; capped: Finding[]; all: Finding[] } {
-  const { inline, capped } = partitionInline(anchored, minimumConfidence, maxComments);
-  const gatedUnanchored = rankFindings(unanchored.filter((finding) => qualifiesForInline(finding, minimumConfidence)));
+  const { inline, capped } = partitionInline(anchored, minimumConfidence, maxComments, requireMultiRun);
+  const gatedUnanchored = rankFindings(
+    unanchored.filter((finding) => qualifiesForInline(finding, minimumConfidence, requireMultiRun)),
+  );
   return { inline, unanchored: gatedUnanchored, capped, all: [...inline, ...gatedUnanchored, ...capped] };
 }
 
@@ -407,13 +434,16 @@ export const FIX_BRIEF_MEDIUM_CONFIDENCE = 0.75;
  * Always includes the PR publish set (critical/high ≥ minimumConfidence).
  * Also includes medium severity at or above fixBriefMediumConfidence (default 0.75).
  * Low/info stay out of the brief (job summary / findings.json only).
+ * When requireMultiRun is set, one-off findings (agreement "single") stay out of the brief too.
  */
 export function qualifiesForFixBrief(
   finding: Finding,
   minimumConfidence: number,
   fixBriefMediumConfidence = FIX_BRIEF_MEDIUM_CONFIDENCE,
+  requireMultiRun = false,
 ): boolean {
-  if (qualifiesForInline(finding, minimumConfidence)) return true;
+  if (requireMultiRun && !hasMultiRunAgreement(finding)) return false;
+  if (qualifiesForInline(finding, minimumConfidence, false)) return true;
   if (finding.severity !== "medium") return false;
   return finding.confidence >= fixBriefMediumConfidence;
 }
@@ -423,9 +453,10 @@ export function fixBriefFindings(
   findings: Finding[],
   minimumConfidence: number,
   fixBriefMediumConfidence = FIX_BRIEF_MEDIUM_CONFIDENCE,
+  requireMultiRun = false,
 ): Finding[] {
   return rankFindings(findings.filter((finding) =>
-    qualifiesForFixBrief(finding, minimumConfidence, fixBriefMediumConfidence)));
+    qualifiesForFixBrief(finding, minimumConfidence, fixBriefMediumConfidence, requireMultiRun)));
 }
 
 /** Filter, deduplicate, rank, and build the GitHub create-review payload. */
@@ -435,8 +466,9 @@ export function githubReviewPayload(
   maxComments = Number.POSITIVE_INFINITY,
   render: (finding: Finding) => string = renderFinding,
   unanchored: Finding[] = [],
+  requireMultiRun = false,
 ): GitHubReviewPayload {
-  const published = publishableFindings(anchored, unanchored, minimumConfidence, maxComments);
+  const published = publishableFindings(anchored, unanchored, minimumConfidence, maxComments, requireMultiRun);
   return {
     event: "COMMENT",
     body: reviewOverviewBody(published.inline, minimumConfidence, {

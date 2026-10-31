@@ -111,6 +111,34 @@ test("renderFinding picks a fence longer than any backtick run in the suggestion
   assert.match(body, /\n`````\n/);
 });
 
+test("renderFinding keeps a short suggestion by shrinking long prose first", () => {
+  const longDesc = "D".repeat(900);
+  const body = renderFinding(sig({
+    description: longDesc,
+    recommendation: "Pin to a commit SHA.",
+    suggestion: "uses: kadraman/reviewbrief@abc123",
+  }) as any, 800);
+  assert.match(body, /```suggestion\nuses: kadraman\/reviewbrief@abc123\n```/);
+  assert.doesNotMatch(body, /Suggestion omitted/);
+  assert.ok(body.length <= 800);
+  // Long prose was compressed (not left intact) so the suggestion could stay.
+  assert.ok(!body.includes(longDesc));
+  assert.match(body, /D…/);
+});
+
+test("renderFinding omits only when the suggestion block itself cannot fit", () => {
+  const huge = Array.from({ length: 40 }, (_, i) => `line_${i}_xxxxxxxxxxxxxxxx`).join("\n");
+  const body = renderFinding(sig({
+    description: "Short problem statement.",
+    recommendation: "Rewrite the block.",
+    suggestion: huge,
+  }) as any, 800);
+  assert.match(body, /Suggestion omitted/);
+  assert.doesNotMatch(body, /```suggestion/);
+  assert.match(body, /Short problem statement/);
+  assert.ok(body.length <= 800);
+});
+
 test("review overview body summarizes inline findings; below-gate stay off the PR", () => {
   const empty = reviewOverviewBody([], 0.85);
   assert.match(empty, /No inline findings met the gate/);

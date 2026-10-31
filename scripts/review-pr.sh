@@ -9,7 +9,8 @@
 # Options:
 #   --repo OWNER/NAME     repository (not needed inside a clone, or with a PR URL)
 #   --dry-run             show how the diff would be split; make no LLM calls
-#   --post                post the review as a comment on the PR
+#   --post                post the review as a PR review; uploads fix-brief.md as a
+#                         secret gist and links it from the review body when present
 #   --out DIR             output directory (default: ./reviewbrief-out/pr-<N>)
 #   --provider NAME       openai | anthropic   (overrides LLM_PROVIDER)
 #   --model NAME          model name           (overrides LLM_MODEL)
@@ -23,7 +24,7 @@
 
 set -euo pipefail
 
-usage() { sed -n '3,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 die() { echo "error: $*" >&2; exit 1; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -142,6 +143,33 @@ echo "Review:     $OUT/review.md"
 
 if [ "$POST" -eq 1 ]; then
   [ -s "$OUT/review-payload.json" ] || die "review-payload.json is missing; cannot post"
+
+  # Mirror the Action: when a fix brief exists, publish it and link it from the review.
+  # Secret gists are unlisted but reachable by anyone with the URL (same as artifact links).
+  if [ -f "$OUT/fix-brief.md" ]; then
+    echo "Uploading fix-brief.md as a secret gist..."
+    # Copy to a named temp file so the gist shows fix-brief-pr-<N>.md (gh uses the basename).
+    BRIEF_DIR="$(mktemp -d "${TMPDIR:-/tmp}/reviewbrief-gist.XXXXXX")" || die "mktemp failed"
+    BRIEF_COPY="$BRIEF_DIR/fix-brief-pr-${PR}.md"
+    cp "$OUT/fix-brief.md" "$BRIEF_COPY"
+    GIST_OUT="$(gh gist create \
+      --desc "ReviewBrief fix brief for ${REPO} PR #${PR}" \
+      "$BRIEF_COPY")" \
+      || { rm -rf "$BRIEF_DIR"; die "failed to create gist for fix-brief.md"; }
+    rm -rf "$BRIEF_DIR"
+    BRIEF_URL="$(printf '%s\n' "$GIST_OUT" | grep -E '^https://gist\.github\.com/' | tail -n1)"
+    [ -n "$BRIEF_URL" ] || die "gh gist create did not print a gist URL (got: $GIST_OUT)"
+    node --input-type=module -e '
+      import { readFileSync, writeFileSync } from "node:fs";
+      const path = process.argv[1], url = process.argv[2];
+      const payload = JSON.parse(readFileSync(path, "utf8"));
+      payload.body = `${payload.body.trimEnd()}\n\n**Fix brief for an AI assistant:** [download fix-brief.md](${url})\n`;
+      writeFileSync(path, JSON.stringify(payload, null, 2));
+    ' "$OUT/review-payload.json" "$BRIEF_URL"
+    printf '%s\n' "$BRIEF_URL" > "$OUT/fix-brief-url.txt"
+    echo "Fix brief gist: $BRIEF_URL"
+  fi
+
   INLINE_COUNT="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync(process.argv[1], "utf8")).comments.length)' "$OUT/review-payload.json")"
   # Always post the gated payload (never the ungated review.md dump). Prefer a
   # PR review; if create-review fails, post the payload body (+ inline text).
