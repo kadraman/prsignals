@@ -404,7 +404,8 @@ async function main(): Promise<number> {
     repo: args.repo, head: args.head, base: args.base };
   // GitHub's own view of the PR diff. Inline comments are only valid on its lines, so anchoring uses it even when
   // the reviewed diff is wider (extra context lines) or narrower (only the newest commits).
-  const anchorDiff = args.anchorDiff ? readFileSync(args.anchorDiff, "utf8") : diff;
+  // '-' means "same as --diff" so we never read stdin twice (fd 0 is exhausted after the first read).
+  const anchorDiff = args.anchorDiff ? (args.anchorDiff === "-" ? diff : readFileSync(args.anchorDiff, "utf8")) : diff;
   ctx.reference = createContextBuilder(diff, contextOptionsFromEnv(env, process.cwd()), anchorDiff);
   mkdirSync(args.outDir, { recursive: true });
   const reviewPath = join(args.outDir, "review.md"), briefPath = join(args.outDir, "fix-brief.md");

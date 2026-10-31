@@ -182,3 +182,21 @@ test("e2e: failed batches are reported in batch order, not completion order", as
     });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("e2e: --diff - and --anchor-diff - reuse stdin once (no second read of fd 0)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "rb-stdin-"));
+  const diff = ["diff --git a/a.py b/a.py", "--- a/a.py", "+++ b/a.py", "@@ -1,1 +1,2 @@", " keep", "+added"].join("\n");
+  try {
+    const result = await new Promise<{ code: number; stderr: string }>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--experimental-strip-types", ENGINE, "--diff", "-", "--anchor-diff", "-", "--out-dir", "out", "--dry-run"], {
+        cwd: dir, env: { ...process.env, LLM_API_KEY: "k", LLM_MODEL: "m", LLM_PROVIDER: "openai" }, windowsHide: true,
+      });
+      let stderr = "";
+      child.stderr.on("data", (d) => { stderr += d; });
+      child.on("error", reject);
+      child.on("close", (code) => resolve({ code: code ?? 1, stderr }));
+      child.stdin.end(diff);
+    });
+    assert.equal(result.code, 0, result.stderr);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
