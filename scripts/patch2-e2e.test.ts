@@ -121,11 +121,13 @@ test("e2e: two consistency runs reward agreement, penalise one-run findings, and
       assert.equal(file.findings.find((s: any) => s.title === "B").confidence, 0.65);
       const once = file.findings.find((s: any) => s.title === "Once");
       assert.equal(once.confidenceBreakdown.agreement, "single");
-      assert.equal(once.inline, false); // high but one-off: not published
+      assert.equal(once.confidence, 0.85);
+      assert.equal(once.inline, true); // high one-off still publishes; agreement only adjusted the score
       assert.equal(file.findings.find((s: any) => s.title === "A").inline, true);
       const payload = JSON.parse(readFileSync(join(out, "review-payload.json"), "utf8"));
-      assert.equal(payload.comments.length, 1);
-      assert.match(payload.comments[0].body, /\*\*A\*\*/);
+      assert.equal(payload.comments.length, 2);
+      assert.match(payload.body, /\*\*Once\*\*/);
+      assert.match(payload.body, /\*\*A\*\*/);
       assert.deepEqual(seen.map((body) => body.temperature), [0, 0.4]);
     });
 });

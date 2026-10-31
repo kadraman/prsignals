@@ -13,6 +13,8 @@ AI-powered pull request review for GitHub that works with **any model** (OpenAI,
 ```
 action.yml                 composite GitHub Action
 scripts/reviewbrief.ts     review engine (also runs standalone)
+scripts/context.ts         per-batch reference context (PR overview, guidance, symbol usages)
+scripts/compute-diffs.sh   review diff + GitHub PR anchor diff for Actions
 scripts/findings.ts        canonical Finding types and GitHub renderer
 scripts/review-pr.sh       run it against an existing PR from your machine
 examples/reviewbrief.yml   workflow that uses the action
@@ -26,7 +28,7 @@ examples/reviewbrief.yml   workflow that uses the action
 You need the [GitHub CLI](https://cli.github.com) (`gh auth login` done), Node.js 22.6+, and an API key.
 
 ```bash
-cp .env.example .env        # then fill in LLM_API_KEY and LLM_MODEL (and LLM_PROVIDER if not openai)
+cp .env.example .env        # then fill in LLM_API_KEY (LLM_MODEL defaults to gpt-5-mini)
 
 # See how the diff would be split, without calling any LLM (no key needed):
 scripts/review-pr.sh 123 --repo OWNER/NAME --dry-run
@@ -70,38 +72,38 @@ node --experimental-strip-types scripts/reviewbrief.ts --diff my.diff --dry-run
    | Name | Type | Notes |
    |---|---|---|
    | `LLM_API_KEY` | Secret | your provider's API key |
-   | `LLM_MODEL` | Variable | required; model name as your provider expects it |
+   | `LLM_MODEL` | Variable | required; recommended default `gpt-5-mini` |
    | `LLM_PROVIDER` | Variable | `openai` (default) or `anthropic` |
-   | `LLM_BASE_URL` | Variable | optional API root override |
+   | `LLM_BASE_URL` | Variable | leave unset for OpenAI; set for DeepSeek/OpenRouter/etc. |
 
 3. Copy `examples/reviewbrief.yml` to `.github/workflows/reviewbrief.yml` and replace `kadraman/reviewbrief@v1` with your action reference.
 
-Use `actions/checkout` with `fetch-depth: 0` (the example does) so very large diffs aren't limited by GitHub's API.
+Use `actions/checkout` with `fetch-depth: 0` (the example does) so very large diffs aren't limited by GitHub's API, synchronize can resolve `github.event.before`, and diffs are computed against the PR head SHA rather than the synthetic merge commit.
 
 To test the action inside this repo before publishing, use `uses: ./` in a workflow here.
 
 ### Provider examples
 
-| Provider | `LLM_PROVIDER` | `LLM_BASE_URL` |
-|---|---|---|
-| Claude | `anthropic` | *(blank)* |
-| OpenAI | `openai` | *(blank)* |
-| DeepSeek | `openai` | `https://api.deepseek.com` |
-| OpenRouter | `openai` | `https://openrouter.ai/api/v1` |
-| Ollama (self-hosted runner) | `openai` | `http://localhost:11434/v1` |
+| Provider | `LLM_PROVIDER` | `LLM_MODEL` (example) | `LLM_BASE_URL` |
+|---|---|---|---|
+| OpenAI (recommended) | `openai` | `gpt-5-mini` | *(blank)* |
+| Claude | `anthropic` | provider model id | *(blank)* |
+| DeepSeek | `openai` | e.g. `deepseek-v4-pro` | `https://api.deepseek.com` |
+| OpenRouter | `openai` | router model id | `https://openrouter.ai/api/v1` |
+| Ollama (self-hosted runner) | `openai` | local model name | `http://localhost:11434/v1` |
 
-Model names change often. Check your provider's docs for the current ones.
+**Recommended default:** `gpt-5-mini` via OpenAI (`LLM_PROVIDER=openai`, leave `LLM_BASE_URL` unset, `LLM_TEMPERATURE=none`). Model names change often — check your provider's docs. If you previously pointed `LLM_BASE_URL` at DeepSeek/OpenRouter/Ollama and switch back to OpenAI, clear that variable; a leftover override sends requests to the wrong host.
 
 ### Action inputs
 
 | Input | Default | Meaning |
 |---|---|---|
 | `api-key` | required | provider API key |
-| `model` | required | model name |
+| `model` | required | model name (recommended: `gpt-5-mini`) |
 | `provider` | `openai` | `openai` or `anthropic` |
-| `base-url` | | API root override |
-| `temperature` | `0` | sampling temperature; set to `none` to omit the parameter (some models reject it) |
-| `consistency-runs` | `2` | independent review passes (1–5); later runs use `CONSISTENCY_TEMPERATURE` (default `0.4`). When ≥2 and all batches succeed, only findings seen in multiple runs are published to the PR / fix brief (one-offs stay in the job summary) |
+| `base-url` | | API root override; leave blank for OpenAI |
+| `temperature` | `0` | sampling temperature; set to `none` to omit the parameter (recommended for `gpt-5*`) |
+| `consistency-runs` | `2` | independent review passes (1–5); later runs use `CONSISTENCY_TEMPERATURE` (default `0.4`). Agreement adjusts confidence scores. Critical/high that clear `minimum-confidence` still publish even if seen in only one run; one-off medium findings stay out of the fix brief |
 | `max-output-tokens` | `8192` | required by the Anthropic API |
 | `batch-chars` | `100000` | max diff characters packed per API call (~25k tokens); lower it for small-context models |
 | `piece-chars` | `20000` | max characters per file piece before hunk-splitting; large files are split even when under `batch-chars` |
@@ -112,6 +114,11 @@ Model names change often. Check your provider's docs for the current ones.
 | `fix-brief` | `true` | also produce `fix-brief.md` (PR-gated findings plus medium severity at ≥ `0.75`; override with env `FIX_BRIEF_MEDIUM_CONFIDENCE`) |
 | `post-comment` | `true` | post the review as a PR comment |
 | `github-token` | `github.token` | needs `pull-requests: write` |
+| `diff-context-lines` | `10` | lines of context around each change in the diff the model reads (GitHub's own diff has 3; inline comments are still anchored to that PR diff) |
+| `context-chars` | `12000` | cap for the reference context (PR file overview, project guidance, other usages of changed symbols) added to each review call; `0` turns it off |
+| `debug-artifacts` | `false` | when `true`, upload `findings.json`, `review-payload.json`, and `scope.txt` (they contain code excerpts) |
+
+Engine-only environment variables (optional, for local runs or advanced tuning): `CONTEXT_CALLERS` (usages shown per changed symbol, default `3`), `CONTEXT_SYMBOLS` (symbols looked up per batch, default `12`), `CONTEXT_DOC_CHARS` (cap for the project-guidance excerpt, default `3000`).
 
 Outputs: `review-path`, `fix-brief-path`, `fix-brief-url`.
 
@@ -134,17 +141,17 @@ or paste/attach it in Copilot, Cursor, or a chat session. The brief tells the as
 1. Split the diff by file; lockfiles, minified files and binaries are skipped (and listed).
 2. A file larger than `piece-chars` (capped by `batch-chars`) is split on hunk boundaries (and on line boundaries inside giant hunks); every part keeps the file header. Split parts are reviewed alone so they are not packed back into one oversized call.
 3. Other pieces are packed into batches up to `batch-chars`.
-4. Each batch is reviewed in its own call (retrying 429/5xx/529 with backoff). If the model still returns invalid JSON (or the request fails), the batch is split further and retried up to two times.
-5. Each response is parsed into the canonical Finding schema. Confidence is computed in code from the model's high/medium/low level plus checked evidence (and agreement across consistency runs). By default the review runs twice (`consistency-runs: 2`); findings are clustered across runs, and **only multi-run findings** are published when agreement scoring is active. Findings are then gated to severity `critical`/`high` at or above `minimum-confidence`. Those are posted as inline review comments when the line is on the diff, otherwise under “Could not place inline” / “Over the inline cap”. Medium and below stay off the PR (job summary / `findings.json`). The fix brief includes the PR-gated set **plus** multi-run medium findings scored ≥ `0.75` (env `FIX_BRIEF_MEDIUM_CONFIDENCE`). Low/info and one-off findings stay out of the brief. The prompt asks the model to skip style, typing, and docs nits so fewer low-value findings are emitted.
+4. Each batch is reviewed in its own call (retrying 429/5xx/529 with backoff). If the model still returns invalid JSON (or the request fails), the batch is split further and retried up to two times. Every batch also gets a bounded **reference context** block: a list of files in the PR, the first project-guidance file found (`AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`, or `CONTRIBUTING.md`), and other usages of symbols declared on changed lines (`git grep` in the checkout). Findings must still be on changed lines in the diff; reference line numbers are approximate.
+5. Each response is parsed into the canonical Finding schema. Confidence is computed in code from the model's high/medium/low level plus checked evidence (and agreement across consistency runs). By default the review runs twice (`consistency-runs: 2`); findings are clustered across runs and agreement adjusts the score (±0.10). Findings are then gated to severity `critical`/`high` at or above `minimum-confidence` — including one-offs (a single-run high can still post). Those are posted as inline review comments when the line is on **GitHub's PR diff** (the anchor diff), otherwise under “Could not place inline” / “Over the inline cap”. Medium and below stay off the PR (job summary / `findings.json`). An empty-gate overview notes how many scored findings stayed below the gate. The fix brief includes the PR-gated set **plus** multi-run medium findings scored ≥ `0.75` (env `FIX_BRIEF_MEDIUM_CONFIDENCE`). Low/info and one-off medium findings stay out of the brief. The prompt asks the model to skip style, typing, and docs nits so fewer low-value findings are emitted.
 
 ### What gets posted, and when
 
-- **Opened / reopened:** ReviewBrief reviews the full PR diff (`origin/<base>...HEAD`) and posts a gated PR review (or a one-line empty-gate note when nothing qualifies).
-- **Synchronize (new commits):** it reviews only the new commits (`before...HEAD`) when that prior SHA is in the checkout. Force-push (missing/`0000…` before SHA) falls back to the full PR diff. If the incremental review finds nothing that meets the publish gate, **no new comment is posted**, so the earlier review stays in place.
+- **Opened / reopened:** ReviewBrief reviews the full PR diff (`origin/<base>...<PR head SHA>`) and posts a gated PR review (or a one-line empty-gate note when nothing qualifies). Diffs use the PR head commit, not the synthetic merge `HEAD` that `actions/checkout` lands on for `pull_request` events.
+- **Synchronize (new commits):** it reviews only the new commits (`before...<PR head SHA>`) when that prior SHA is still an ancestor of the new head. Force-push, rebase, or a missing previous head falls back to the full PR diff. The model sees `diff-context-lines` of context; inline comments are anchored to GitHub's own PR diff. If the incremental review finds nothing that meets the publish gate, **no new comment is posted**, so the earlier review stays in place.
 - The review footer names the range (`Reviewed changes since <sha>` vs the full PR) so a partial review is obvious.
 - `create-review` failures fall back to an issue comment built from the gated payload — never the ungated `review.md` dump.
 
-Limitations: batches are reviewed independently, so problems that span files in different batches can be missed. Cost scales with PR size; `max-batches` caps it. If **every** batch fails (bad key, wrong model name), the run fails instead of posting an error comment. Incremental synchronize reviews will not re-discover findings that only appear when the whole PR is reviewed together.
+Limitations: batches are reviewed independently, so problems that span files in different batches can be missed (reference context reduces that for symbol usages and project rules). Cost scales with PR size; `max-batches` caps it. If **every** batch fails (bad key, wrong model name), the run fails instead of posting an error comment. Incremental synchronize reviews will not re-discover findings that only appear when the whole PR is reviewed together. Symbol extraction is regex-based and language-agnostic.
 
 ---
 
@@ -152,7 +159,7 @@ Limitations: batches are reviewed independently, so problems that span files in 
 
 - The diff is sent to your LLM provider. Check that's acceptable for private code.
 - Don't wire this to `pull_request_target` with a checkout of the PR head; that would run an untrusted PR with your secrets in reach. The provided workflow uses `pull_request` and skips fork PRs (GitHub withholds secrets from them anyway).
-- PR title/body are passed through environment variables, never interpolated into shell code, and the model is told the diff is untrusted data. A determined prompt injection can still skew a review, so treat output as advice.
+- PR title/body are passed through environment variables, never interpolated into shell code, and the model is told the diff and reference context (project docs, code at usage sites) are untrusted data. A determined prompt injection can still skew a review, so treat output as advice.
 - Pin the action to a release tag or commit SHA in your workflow.
 - Keep `.env` out of git (it's in `.gitignore`).
 

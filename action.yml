@@ -11,22 +11,22 @@ inputs:
     description: API key for your LLM provider (pass it from a repository secret).
     required: true
   model:
-    description: Model name, exactly as your provider's API expects it.
+    description: Model name, exactly as your provider's API expects it (recommended gpt-5-mini).
     required: true
   provider:
     description: "API protocol: 'openai' (any OpenAI-compatible API) or 'anthropic'."
     required: false
     default: openai
   base-url:
-    description: Optional API root override (e.g. https://api.deepseek.com).
+    description: Optional API root override (e.g. https://api.deepseek.com). Leave blank for OpenAI.
     required: false
     default: ""
   temperature:
-    description: Sampling temperature (default 0). Set to 'none' to omit the parameter (some models reject it).
+    description: Sampling temperature (default 0). Set to 'none' to omit the parameter (recommended for gpt-5*).
     required: false
     default: ""
   consistency-runs:
-    description: Independent review passes for agreement scoring (1-5, default 2). Extra runs use CONSISTENCY_TEMPERATURE. When ≥2 and all batches succeed, only findings seen in multiple runs are published to the PR / fix brief.
+    description: Independent review passes for agreement scoring (1-5, default 2). Extra runs use CONSISTENCY_TEMPERATURE. Agreement adjusts confidence; critical/high that clear the floor still publish as one-offs. One-off medium findings stay out of the fix brief.
     required: false
     default: "2"
   max-output-tokens:
@@ -69,6 +69,18 @@ inputs:
     description: Token used to post the comment (needs pull-requests write).
     required: false
     default: ${{ github.token }}
+  diff-context-lines:
+    description: Lines of context around each change in the diff the model reads (GitHub's own diff has 3).
+    required: false
+    default: "10"
+  context-chars:
+    description: Cap for the reference context added to each review call. 0 turns it off.
+    required: false
+    default: "12000"
+  debug-artifacts:
+    description: "true to upload findings.json and review-payload.json (they contain code excerpts)."
+    required: false
+    default: "false"
 
 outputs:
   review-path:
@@ -84,45 +96,26 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Compute diff
+    - name: Compute diffs
+      id: diffs
       shell: bash
       env:
+        ACTION_PATH: ${{ github.action_path }}
+        OUT_DIR: ${{ runner.temp }}/reviewbrief
         BASE_REF: ${{ github.base_ref }}
-        PR_NUMBER: ${{ github.event.pull_request.number }}
-        PR_ACTION: ${{ github.event.action }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         BEFORE_SHA: ${{ github.event.before }}
+        PR_ACTION: ${{ github.event.action }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        DIFF_CONTEXT_LINES: ${{ inputs.diff-context-lines }}
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
-        out="$RUNNER_TEMP/reviewbrief"
-        mkdir -p "$out"
         if [ -z "${BASE_REF:-}" ]; then
           echo "::error::reviewbrief must run on a pull_request event."
           exit 1
         fi
-        git fetch --no-tags --quiet origin "$BASE_REF" 2>/dev/null || true
-        REVIEW_SCOPE="Reviewed the full pull request diff against origin/${BASE_REF}."
-        DIFF_RANGE="origin/${BASE_REF}...HEAD"
-        # On synchronize, review only commits since the previous head when that SHA is present.
-        ZERO_SHA="0000000000000000000000000000000000000000"
-        if [ "${PR_ACTION:-}" = "synchronize" ] && [ -n "${BEFORE_SHA:-}" ] && [ "$BEFORE_SHA" != "$ZERO_SHA" ]; then
-          if git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-            DIFF_RANGE="${BEFORE_SHA}...HEAD"
-            SHORT="$(git rev-parse --short "$BEFORE_SHA")"
-            REVIEW_SCOPE="Reviewed changes since ${SHORT} (incremental push), not the full pull request."
-            echo "Incremental review: $DIFF_RANGE"
-          else
-            echo "Before SHA $BEFORE_SHA is not in the checkout; reviewing the full PR diff."
-          fi
-        fi
-        printf '%s\n' "$REVIEW_SCOPE" > "$out/review-scope.txt"
-        if ! git diff --no-color "$DIFF_RANGE" > "$out/pr.diff" 2>/dev/null; then
-          echo "git diff failed (shallow checkout?); falling back to 'gh pr diff'."
-          echo "Tip: use actions/checkout with fetch-depth: 0 to avoid GitHub's API diff limits."
-          REVIEW_SCOPE="Reviewed the full pull request diff (gh pr diff fallback)."
-          printf '%s\n' "$REVIEW_SCOPE" > "$out/review-scope.txt"
-          gh pr diff "$PR_NUMBER" > "$out/pr.diff"
-        fi
+        bash "$ACTION_PATH/scripts/compute-diffs.sh"
 
     - name: Set up Node.js for the TypeScript renderer
       uses: actions/setup-node@v4
@@ -148,17 +141,25 @@ runs:
         MINIMUM_CONFIDENCE: ${{ inputs.minimum-confidence }}
         MAX_INLINE_COMMENTS: ${{ inputs.max-inline-comments }}
         FIX_BRIEF: ${{ inputs.fix-brief }}
+        ANCHOR_DIFF_FILE: ${{ runner.temp }}/reviewbrief/anchor.diff
+        CONTEXT_CHARS: ${{ inputs.context-chars }}
         PR_TITLE: ${{ github.event.pull_request.title }}
         PR_BODY: ${{ github.event.pull_request.body }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_HEAD: ${{ github.head_ref }}
         PR_BASE: ${{ github.base_ref }}
         REPO: ${{ github.repository }}
+        BEFORE_SHA: ${{ github.event.before }}
+        BASE_REF: ${{ github.base_ref }}
       run: |
         set -euo pipefail
         out="$RUNNER_TEMP/reviewbrief"
-        if [ -f "$out/review-scope.txt" ]; then
-          export REVIEW_SCOPE="$(cat "$out/review-scope.txt")"
+        scope="$(cat "$out/scope.txt" 2>/dev/null || echo full)"
+        if [ "$scope" = "incremental" ] && [ -n "${BEFORE_SHA:-}" ]; then
+          SHORT="$(git rev-parse --short "$BEFORE_SHA" 2>/dev/null || echo "${BEFORE_SHA:0:7}")"
+          export REVIEW_SCOPE="Reviewed changes since ${SHORT} (incremental push), not the full pull request."
+        else
+          export REVIEW_SCOPE="Reviewed the full pull request diff against origin/${BASE_REF}."
         fi
         node --experimental-strip-types "$ACTION_PATH/scripts/reviewbrief.ts" --diff "$out/pr.diff" --out-dir "$out"
         echo "review_path=$out/review.md" >> "$GITHUB_OUTPUT"
@@ -176,6 +177,18 @@ runs:
         name: fix-brief-pr-${{ github.event.pull_request.number }}
         path: ${{ steps.review.outputs.brief_path }}
         retention-days: 14
+
+    - name: Upload debug artifacts
+      if: always() && inputs.debug-artifacts == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: reviewbrief-debug-pr-${{ github.event.pull_request.number }}
+        path: |
+          ${{ runner.temp }}/reviewbrief/findings.json
+          ${{ runner.temp }}/reviewbrief/review-payload.json
+          ${{ runner.temp }}/reviewbrief/scope.txt
+        retention-days: 7
+        if-no-files-found: ignore
 
     - name: Post review comment
       if: inputs.post-comment == 'true' && github.event.pull_request
